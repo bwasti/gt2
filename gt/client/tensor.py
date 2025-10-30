@@ -534,14 +534,14 @@ def from_numpy(array: np.ndarray, requires_grad: bool = False) -> Tensor:
     return tensor
 
 
-def randn(*shape, dtype="float32") -> Tensor:
+def randn(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
     """Create a random tensor with normal distribution."""
     from gt.transport.protocol import UnaryOp, ClientResponse
 
     if _client_connection is None:
         raise RuntimeError("Not connected to dispatcher")
 
-    tensor = Tensor(shape=shape, dtype=dtype)
+    tensor = Tensor(shape=shape, dtype=dtype, requires_grad=requires_grad)
 
     # Get current signal scope
     from gt.signal import current_signal
@@ -568,14 +568,14 @@ def randn(*shape, dtype="float32") -> Tensor:
     return tensor
 
 
-def zeros(*shape, dtype="float32") -> Tensor:
+def zeros(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
     """Create a tensor filled with zeros."""
     from gt.transport.protocol import UnaryOp, ClientResponse
 
     if _client_connection is None:
         raise RuntimeError("Not connected to dispatcher")
 
-    tensor = Tensor(shape=shape, dtype=dtype)
+    tensor = Tensor(shape=shape, dtype=dtype, requires_grad=requires_grad)
 
     # Get current signal scope
     from gt.signal import current_signal

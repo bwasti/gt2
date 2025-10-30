@@ -11,9 +11,9 @@ import time
 from gt.transport.connection import create_server, Connection
 from gt.transport.protocol import (
     ClientCommand, CreateTensor, BinaryOp, UnaryOp, GetData, FreeTensor, CopyTensor,
-    CompileStart, CompileEnd,
+    CompileStart, CompileEnd, GetWorkerStats,
     ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
-    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerResponse
+    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
 )
 from gt.dispatcher.tensor_handle import TensorHandle
 
@@ -241,6 +241,8 @@ class Dispatcher:
                 return self._handle_compile_start(cmd, client_id)
             elif isinstance(cmd, CompileEnd):
                 return self._handle_compile_end(cmd, client_id)
+            elif isinstance(cmd, GetWorkerStats):
+                return self._handle_get_worker_stats(cmd, client_id)
             else:
                 return ClientResponse(success=False, error=f"Unknown command: {type(cmd)}")
         except Exception as e:
@@ -836,6 +838,24 @@ class Dispatcher:
 
         return ClientResponse(success=True)
 
+    def _handle_get_worker_stats(self, cmd: GetWorkerStats, client_id: str) -> ClientResponse:
+        """Handle worker stats request - query all workers and aggregate."""
+        all_stats = {}
+
+        for worker in self.workers:
+            worker_cmd = WorkerGetStats()
+            self._log_worker_cmd(worker["id"], "WorkerGetStats", "")
+            worker["conn"].send(worker_cmd)
+            worker_response: WorkerResponse = worker["conn"].recv()
+            self._log_worker_response(worker["id"], "WorkerGetStats", worker_response.success)
+
+            if worker_response.success:
+                all_stats[worker["id"]] = worker_response.data
+            else:
+                all_stats[worker["id"]] = {'error': worker_response.error}
+
+        return ClientResponse(success=True, data=all_stats)
+
     def _get_cmd_details(self, cmd) -> str:
         """Extract useful details from command for logging."""
         if isinstance(cmd, CreateTensor):
@@ -856,6 +876,8 @@ class Dispatcher:
             return f"signal={cmd.signal_name}"
         elif isinstance(cmd, CompileEnd):
             return f"signal={cmd.signal_name}"
+        elif isinstance(cmd, GetWorkerStats):
+            return ""
         return ""
 
     def _log_worker_cmd(self, worker_id: str, cmd_type: str, details: str = ""):

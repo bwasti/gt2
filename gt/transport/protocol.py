@@ -80,6 +80,12 @@ class CompileEnd(ClientCommand):
 
 
 @dataclass
+class GetWorkerStats(ClientCommand):
+    """Request compilation and operation statistics from workers."""
+    pass
+
+
+@dataclass
 class ClientResponse:
     """Response from dispatcher to client."""
     success: bool
@@ -152,6 +158,12 @@ class WorkerCompileStart(WorkerCommand):
 class WorkerCompileEnd(WorkerCommand):
     """Signal worker to end a compilation region and compile."""
     signal_name: str
+
+
+@dataclass
+class WorkerGetStats(WorkerCommand):
+    """Request statistics from worker."""
+    pass
 
 
 @dataclass

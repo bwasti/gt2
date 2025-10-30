@@ -219,44 +219,48 @@ def tensor(data: Union[List, np.ndarray], dtype: str = 'float32', requires_grad:
     return from_numpy(data, requires_grad=requires_grad)
 
 
-def randn(*shape, dtype: str = 'float32'):
+def randn(*shape, dtype: str = 'float32', requires_grad: bool = False):
     """
     Create a tensor with random normal values.
 
     Args:
         *shape: Shape of the tensor
         dtype: Data type
+        requires_grad: Whether to track gradients (default: False)
 
     Returns:
         Tensor object
 
     Example:
         a = gt.randn(3, 4)
+        b = gt.randn(10, 10, requires_grad=True)
     """
     _ensure_connected()
 
     from gt.client.tensor import randn as _randn
-    return _randn(*shape, dtype=dtype)
+    return _randn(*shape, dtype=dtype, requires_grad=requires_grad)
 
 
-def zeros(*shape, dtype: str = 'float32'):
+def zeros(*shape, dtype: str = 'float32', requires_grad: bool = False):
     """
     Create a tensor filled with zeros.
 
     Args:
         *shape: Shape of the tensor
         dtype: Data type
+        requires_grad: Whether to track gradients (default: False)
 
     Returns:
         Tensor object
 
     Example:
         a = gt.zeros(3, 4)
+        b = gt.zeros(10, 10, requires_grad=True)
     """
     _ensure_connected()
 
     from gt.client.tensor import zeros as _zeros
-    return _zeros(*shape, dtype=dtype)
+    return _zeros(*shape, dtype=dtype, requires_grad=requires_grad)
 
 
 def from_numpy(array: np.ndarray, requires_grad: bool = False):
@@ -308,6 +312,9 @@ from gt import signal  # Import module for signal.context() and signal.tensor()
 
 # Config loading
 from gt.config import load_config, get_config, get_signal_config
+
+# Debug utilities
+from gt import debug  # Import module for debug.get_tape(), debug.get_worker_stats()
 
 
 # Cleanup on exit

@@ -12,7 +12,7 @@ from typing import List, Dict, Any
 from gt.transport.connection import connect, Connection
 from gt.transport.protocol import (
     WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
-    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerResponse
+    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
 )
 from gt.worker.engine import create_engine, Engine, Operation
 
@@ -42,6 +42,14 @@ class Worker:
         # Compilation region tracking
         self.in_compile_region = False
         self.current_compile_signal = None
+
+        # Statistics tracking
+        self.stats = {
+            'operations': {
+                'total': 0,
+                'batched': 0,
+            }
+        }
 
         # Create engine
         self.engine: Engine = create_engine(backend)
@@ -117,6 +125,8 @@ class Worker:
                 return self._handle_compile_start(cmd)
             elif isinstance(cmd, WorkerCompileEnd):
                 return self._handle_compile_end(cmd)
+            elif isinstance(cmd, WorkerGetStats):
+                return self._handle_get_stats(cmd)
             else:
                 return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
         except Exception as e:
@@ -137,6 +147,8 @@ class Worker:
         Returns success immediately - actual execution is deferred.
         """
         self.pending_operations.append(cmd)
+        self.stats['operations']['total'] += 1
+        self.stats['operations']['batched'] += 1
 
         # Check if batch is now full
         if len(self.pending_operations) >= self.batch_size:
@@ -193,6 +205,8 @@ class Worker:
 
     def _handle_binary_op(self, cmd: WorkerBinaryOp) -> WorkerResponse:
         """Execute binary operation."""
+        self.stats['operations']['total'] += 1
+
         if cmd.left_id not in self.tensors or cmd.right_id not in self.tensors:
             return WorkerResponse(success=False, error="Input tensor not found")
 
@@ -224,6 +238,8 @@ class Worker:
 
     def _handle_unary_op(self, cmd: WorkerUnaryOp) -> WorkerResponse:
         """Execute unary operation."""
+        self.stats['operations']['total'] += 1
+
         # Operations that create new data
         if cmd.input_id is None:
             if cmd.op == "randn":
@@ -307,3 +323,19 @@ class Worker:
         self.in_compile_region = False
         self.current_compile_signal = None
         return WorkerResponse(success=True)
+
+    def _handle_get_stats(self, cmd: WorkerGetStats) -> WorkerResponse:
+        """Handle stats request - return compilation and operation statistics."""
+        stats = {
+            'operations': self.stats['operations'].copy()
+        }
+
+        # Get compilation stats from engine if available
+        if hasattr(self.engine, '_cache_hits'):
+            stats['compilation'] = {
+                'cache_hits': self.engine._cache_hits,
+                'cache_misses': self.engine._cache_misses,
+                'num_cached_graphs': len(self.engine._compiled_cache) if hasattr(self.engine, '_compiled_cache') else 0,
+            }
+
+        return WorkerResponse(success=True, data=stats)
