@@ -140,6 +140,8 @@ class Worker:
             result = self.engine.sigmoid(input_tensor)
         elif cmd.op == "tanh":
             result = self.engine.tanh(input_tensor)
+        elif cmd.op == "transpose":
+            result = self.engine.transpose(input_tensor)
         else:
             return WorkerResponse(success=False, error=f"Unknown op: {cmd.op}")
 

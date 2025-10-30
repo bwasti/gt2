@@ -58,6 +58,13 @@ class FreeTensor(ClientCommand):
 
 
 @dataclass
+class CopyTensor(ClientCommand):
+    """Copy data from one tensor to another (in-place update)."""
+    dest_id: int  # Destination tensor ID
+    src_id: int   # Source tensor ID
+
+
+@dataclass
 class ClientResponse:
     """Response from dispatcher to client."""
     success: bool

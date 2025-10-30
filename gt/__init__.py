@@ -243,6 +243,50 @@ def zeros(*shape, dtype: str = 'float32'):
     return _zeros(*shape, dtype=dtype)
 
 
+def from_numpy(array: np.ndarray, requires_grad: bool = False):
+    """
+    Create a tensor from a numpy array (PyTorch-compatible alias).
+
+    Args:
+        array: Numpy array
+        requires_grad: Whether to track gradients (default: False)
+
+    Returns:
+        Tensor object
+
+    Example:
+        import numpy as np
+        a = gt.from_numpy(np.array([1, 2, 3]))
+    """
+    _ensure_connected()
+
+    from gt.client.tensor import from_numpy as _from_numpy
+    return _from_numpy(array, requires_grad=requires_grad)
+
+
+class no_grad:
+    """
+    Context manager to disable gradient tracking (PyTorch-compatible).
+
+    Example:
+        with gt.no_grad():
+            # Operations here won't track gradients
+            output = model(input)
+    """
+
+    def __init__(self):
+        self.prev_requires_grad = []
+
+    def __enter__(self):
+        # For now, this is a no-op since we don't have a global grad mode
+        # In PyTorch, this would set torch.is_grad_enabled() = False
+        return self
+
+    def __exit__(self, *args):
+        # Restore gradient tracking
+        pass
+
+
 # Cleanup on exit
 def _cleanup():
     global _client, _auto_server

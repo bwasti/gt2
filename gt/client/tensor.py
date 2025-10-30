@@ -55,7 +55,7 @@ class Tensor:
         self.requires_grad = requires_grad
 
         # Register for garbage collection
-        weakref.finalize(self, _free_tensor, self.id)
+        self._finalizer = weakref.finalize(self, _free_tensor, self.id)
 
     @property
     def data(self):
@@ -96,14 +96,47 @@ class Tensor:
     def __mul__(self, other):
         return _binary_op("mul", self, other)
 
+    def __rmul__(self, other):
+        """Reverse multiplication: other * self"""
+        return self * other
+
     def __matmul__(self, other):
         return _binary_op("matmul", self, other)
 
     def __sub__(self, other):
         return _binary_op("sub", self, other)
 
+    def __isub__(self, other):
+        """In-place subtraction: a -= b"""
+        # Compute the subtraction
+        result = self - other
+
+        # Steal result's ID and metadata
+        new_id = result.id
+        new_shape = result.shape
+        new_dtype = result.dtype
+
+        # Detach result's finalizer to prevent it from freeing the tensor we're adopting
+        result._finalizer.detach()
+
+        # Update this tensor's ID to point to the new result
+        # The old tensor will be garbage collected naturally
+        self.id = new_id
+        self.shape = new_shape
+        self.dtype = new_dtype
+
+        return self
+
     def __truediv__(self, other):
         return _binary_op("div", self, other)
+
+    def __pow__(self, other):
+        """Power operation: a ** b"""
+        # For now, handle simple case of squaring (** 2)
+        if isinstance(other, (int, float)) and other == 2:
+            return self * self
+        else:
+            raise NotImplementedError(f"Power operation only supports ** 2 for now, got ** {other}")
 
     def __neg__(self):
         """Negate a tensor: -a"""
@@ -145,8 +178,38 @@ class Tensor:
 
     def transpose(self):
         """Transpose tensor (swap last two dimensions)"""
-        # TODO: implement transpose
-        raise NotImplementedError("transpose not yet implemented")
+        return _unary_op("transpose", self)
+
+    @property
+    def T(self):
+        """Transpose property (PyTorch/NumPy style)"""
+        return self.transpose()
+
+    def item(self):
+        """Get scalar value (for 0-d or 1-element tensors)."""
+        data = self.data.numpy()
+        if data.size != 1:
+            raise ValueError(f"item() only works on tensors with 1 element, got {data.size}")
+        return float(data.flatten()[0])
+
+    def zero_(self):
+        """Zero out the tensor in-place (PyTorch-style)."""
+        # For gradient tensors, just detach them so they'll be recreated on next backward
+        # This is simpler than actually zeroing the data
+        if self.shape is None:
+            # Gradient tensor without shape info - just mark for GC
+            self._finalizer.detach()
+            return self
+
+        # For regular tensors, replace with zeros
+        zeros_tensor = zeros(*self.shape, dtype=self.dtype)
+
+        # Swap IDs (functional approach)
+        self._finalizer.detach()  # Detach old finalizer
+        self.id = zeros_tensor.id
+        zeros_tensor._finalizer.detach()  # Prevent zeros_tensor from freeing our new ID
+
+        return self
 
     def backward(self):
         """
@@ -159,13 +222,19 @@ class Tensor:
         graph.backward(self)
 
 
-def _binary_op(op: str, left: Tensor, right: Tensor) -> Tensor:
+def _binary_op(op: str, left, right) -> Tensor:
     """Execute a binary operation."""
     from gt.transport.protocol import BinaryOp, ClientResponse
     from gt.client.autograd import get_graph
 
     if _client_connection is None:
         raise RuntimeError("Not connected to dispatcher")
+
+    # Convert scalars to tensors
+    if not isinstance(left, Tensor):
+        left = from_numpy(np.array(left, dtype='float32'))
+    if not isinstance(right, Tensor):
+        right = from_numpy(np.array(right, dtype='float32'))
 
     # Check if we need gradients
     requires_grad = left.requires_grad or right.requires_grad
@@ -197,10 +266,12 @@ def _binary_op(op: str, left: Tensor, right: Tensor) -> Tensor:
             elif op == "div":
                 return [grad_output / right, -grad_output * left / (right * right)]
             elif op == "matmul":
-                # For matmul: grad_left = grad_output @ right.T
-                #             grad_right = left.T @ grad_output
-                # This is simplified - would need proper transpose
-                return [grad_output, grad_output]
+                # For matmul: C = A @ B
+                # grad_A = grad_C @ B.T
+                # grad_B = A.T @ grad_C
+                grad_left = grad_output @ right.T
+                grad_right = left.T @ grad_output
+                return [grad_left, grad_right]
             elif op == "gt":
                 # Comparison operations have zero gradient
                 zero = from_numpy(np.array(0.0, dtype='float32'))
@@ -240,7 +311,6 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
             if op == "sum":
                 # grad of sum: broadcast scalar gradient to input shape
                 # Create a tensor filled with the gradient value
-                import numpy as np
                 grad_val = grad_output.data.numpy()
                 if input_tensor.shape:
                     broadcasted = np.full(input_tensor.shape, grad_val, dtype='float32')
@@ -271,6 +341,9 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
                 # grad of tanh(x): (1 - tanh²(x)) * grad_output
                 one = from_numpy(np.array(1.0, dtype='float32'))
                 return [grad_output * (one - result * result)]
+            elif op == "transpose":
+                # grad of transpose: just transpose the gradient back
+                return [grad_output.T]
             else:
                 raise RuntimeError(f"Gradient not implemented for {op}")
 
@@ -283,7 +356,7 @@ def _free_tensor(tensor_id: int):
     """Callback for garbage collection."""
     from gt.transport.protocol import FreeTensor
 
-    if _client_connection is None:
+    if _client_connection is None or tensor_id is None:
         return
 
     try:

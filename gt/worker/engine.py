@@ -73,6 +73,11 @@ class Engine(ABC):
         pass
 
     @abstractmethod
+    def transpose(self, tensor: Any) -> Any:
+        """Transpose (swap last two dimensions)."""
+        pass
+
+    @abstractmethod
     def supports_distributed(self) -> bool:
         """Whether this engine supports distributed operations."""
         pass
@@ -128,6 +133,9 @@ class NumpyEngine(Engine):
 
     def tanh(self, tensor: np.ndarray) -> np.ndarray:
         return np.tanh(tensor)
+
+    def transpose(self, tensor: np.ndarray) -> np.ndarray:
+        return np.transpose(tensor)
 
     def supports_distributed(self) -> bool:
         return False
@@ -192,6 +200,9 @@ class PyTorchEngine(Engine):
 
     def tanh(self, tensor):
         return self.torch.tanh(tensor)
+
+    def transpose(self, tensor):
+        return self.torch.transpose(tensor, -2, -1)
 
     def supports_distributed(self) -> bool:
         return True

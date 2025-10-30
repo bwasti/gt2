@@ -9,7 +9,7 @@ Keep this SIMPLE and READABLE.
 import threading
 from gt.transport.connection import create_server, Connection
 from gt.transport.protocol import (
-    ClientCommand, CreateTensor, BinaryOp, UnaryOp, GetData, FreeTensor,
+    ClientCommand, CreateTensor, BinaryOp, UnaryOp, GetData, FreeTensor, CopyTensor,
     ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
     WorkerGetData, WorkerFreeTensor, WorkerResponse
 )
@@ -99,6 +99,8 @@ class Dispatcher:
                 return self._handle_get_data(cmd, client_id)
             elif isinstance(cmd, FreeTensor):
                 return self._handle_free_tensor(cmd, client_id)
+            elif isinstance(cmd, CopyTensor):
+                return self._handle_copy_tensor(cmd, client_id)
             else:
                 return ClientResponse(success=False, error=f"Unknown command: {type(cmd)}")
         except Exception as e:
@@ -342,6 +344,54 @@ class Dispatcher:
                 pass  # Worker might be dead
 
         self.tensor_handles.free(client_id, cmd.tensor_id)
+        return ClientResponse(success=True)
+
+    def _handle_copy_tensor(self, cmd: CopyTensor, client_id: str) -> ClientResponse:
+        """Handle in-place tensor copy (dest_tensor = src_tensor)."""
+        # Get locations of both tensors
+        dest_loc = self.tensor_handles.get_location(client_id, cmd.dest_id)
+        src_loc = self.tensor_handles.get_location(client_id, cmd.src_id)
+
+        if not dest_loc:
+            return ClientResponse(success=False, error="Destination tensor not found")
+        if not src_loc:
+            return ClientResponse(success=False, error="Source tensor not found")
+
+        # For simplicity, assume they're on the same worker (common case for parameter updates)
+        # In a full implementation, would need to handle cross-worker copies
+        if dest_loc.worker_id != src_loc.worker_id:
+            return ClientResponse(success=False, error="Cross-worker copy not yet supported")
+
+        # Send copy command to worker (reuse CreateTensor to overwrite)
+        worker = self._get_worker(dest_loc.worker_id)
+        if not worker:
+            return ClientResponse(success=False, error="Worker not found")
+
+        # Get the source data
+        get_cmd = WorkerGetData(tensor_id=src_loc.worker_tensor_id)
+        worker["conn"].send(get_cmd)
+        get_response = worker["conn"].recv()
+
+        if not get_response.success:
+            return ClientResponse(success=False, error=f"Failed to get source data: {get_response.error}")
+
+        # Overwrite the destination tensor
+        create_cmd = WorkerCreateTensor(
+            tensor_id=dest_loc.worker_tensor_id,
+            data=get_response.data,
+            dtype=dest_loc.dtype,
+            shape=get_response.data.shape
+        )
+        worker["conn"].send(create_cmd)
+        create_response = worker["conn"].recv()
+
+        if not create_response.success:
+            return ClientResponse(success=False, error=f"Failed to copy data: {create_response.error}")
+
+        # Update the destination tensor's metadata to match source
+        dest_loc.shape = src_loc.shape
+        dest_loc.dtype = src_loc.dtype
+
         return ClientResponse(success=True)
 
     def _handle_distributed_matmul(self, cmd: BinaryOp, client_id: str, left_locs, right_locs) -> ClientResponse:
