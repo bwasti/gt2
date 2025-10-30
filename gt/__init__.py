@@ -29,6 +29,7 @@ from typing import Optional, List, Union
 _connected = False
 _auto_server = None
 _client = None
+_num_gpu_workers = 1  # Default to 1 worker in auto-connect mode
 
 
 def connect(address: str):
@@ -55,19 +56,43 @@ def connect(address: str):
     _connected = True
 
 
+def gpu_workers(n: int):
+    """
+    Configure number of GPU workers for auto-connect mode.
+
+    Must be called BEFORE any tensor operations (before auto-connect happens).
+
+    Args:
+        n: Number of GPU workers to spawn (default: 1)
+
+    Example:
+        import gt
+        gt.gpu_workers(4)  # Use 4 GPUs
+        a = gt.randn(128, 64)  # Will auto-shard across 4 workers
+    """
+    global _num_gpu_workers, _connected
+
+    if _connected:
+        raise RuntimeError("gpu_workers() must be called before any tensor operations")
+
+    _num_gpu_workers = n
+
+
 def _ensure_connected():
     """Ensure we're connected to a server, starting one if needed."""
-    global _connected, _auto_server, _client
+    global _connected, _auto_server, _client, _num_gpu_workers
 
     if _connected:
         return
 
     # Auto-start local server
-    print("GT: Auto-starting local server...")
+    import time
+    start_time = time.time()
+    num_workers = _num_gpu_workers
+    print(f"GT: Auto-starting local server with {num_workers} worker(s)...")
     from gt.dispatcher.dispatcher import Dispatcher
     from gt.worker.worker import Worker
     from gt.transport.connection import create_server, Connection
-    import time
 
     dispatcher = Dispatcher(host='localhost', port=0)  # Use port 0 for auto-assign
     dispatcher.running = True
@@ -75,14 +100,23 @@ def _ensure_connected():
     # Create server socket
     server_sock = create_server('localhost', 0)
     actual_port = server_sock.getsockname()[1]
-    print(f"GT: Server listening on localhost:{actual_port}")
+    t1 = time.time()
+    print(f"GT: Server socket created ({(t1-start_time)*1000:.1f}ms)")
+
+    # Event to signal when all workers are connected
+    workers_ready = threading.Event()
 
     # Start dispatcher in thread
     def run_dispatcher():
-        # Accept worker connection
-        sock, addr = server_sock.accept()
-        conn = Connection(sock)
-        dispatcher.register_worker(conn, "auto_worker")
+        # Accept N worker connections
+        for i in range(num_workers):
+            sock, addr = server_sock.accept()
+            conn = Connection(sock)
+            worker_id = f"auto_worker_{i}" if num_workers > 1 else "auto_worker"
+            dispatcher.register_worker(conn, worker_id)
+
+        # Signal that all workers are connected
+        workers_ready.set()
 
         # Accept client connections
         while dispatcher.running:
@@ -101,17 +135,36 @@ def _ensure_connected():
 
     dispatcher_thread = threading.Thread(target=run_dispatcher, daemon=True)
     dispatcher_thread.start()
-    time.sleep(0.1)
 
-    # Start worker in thread
-    def run_worker():
-        time.sleep(0.1)
-        worker = Worker(worker_id="auto_worker", backend='numpy')
-        worker.connect_to_dispatcher(dispatcher_host='localhost', dispatcher_port=actual_port)
+    # Start N workers in threads immediately
+    t2 = time.time()
+    print(f"GT: Spawning {num_workers} worker(s)... ({(t2-t1)*1000:.1f}ms)")
+    worker_threads = []
+    for i in range(num_workers):
+        def make_run_worker(worker_id, gpu_id):
+            def run_worker():
+                # Set CUDA_VISIBLE_DEVICES to assign this worker to a specific GPU
+                import os
+                os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
-    worker_thread = threading.Thread(target=run_worker, daemon=True)
-    worker_thread.start()
-    time.sleep(0.2)
+                # Use PyTorch backend for multi-worker (sharding), numpy for single worker
+                backend = 'pytorch' if num_workers > 1 else 'numpy'
+                worker = Worker(worker_id=worker_id, backend=backend)
+                worker.connect_to_dispatcher(dispatcher_host='localhost', dispatcher_port=actual_port)
+            return run_worker
+
+        worker_id = f"auto_worker_{i}" if num_workers > 1 else "auto_worker"
+        worker_thread = threading.Thread(
+            target=make_run_worker(worker_id, i),
+            daemon=True
+        )
+        worker_thread.start()
+        worker_threads.append(worker_thread)
+
+    # Wait for all workers to connect
+    workers_ready.wait()
+    t3 = time.time()
+    print(f"GT: All workers connected ({(t3-t2)*1000:.1f}ms)")
 
     # Connect client
     from gt.client.client import Client
@@ -120,7 +173,8 @@ def _ensure_connected():
     _connected = True
     _auto_server = (dispatcher, server_sock)
 
-    print("GT: Ready!")
+    t4 = time.time()
+    print(f"GT: Ready! Total startup time: {(t4-start_time)*1000:.1f}ms")
 
 
 def tensor(data: Union[List, np.ndarray], dtype: str = 'float32', requires_grad: bool = False):

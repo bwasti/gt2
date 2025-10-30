@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gt"
+version = "0.1.0"
+description = "Distributed frontend for GPU ML operations"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+keywords = ["distributed", "machine-learning", "gpu", "pytorch", "tensor"]
+authors = [
+    {name = "GT Team"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.20.0",
+    "pytest>=7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "torch>=2.0.0",
+]
+all = [
+    "torch>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/gt2"
+Documentation = "https://github.com/yourusername/gt2"
+Repository = "https://github.com/yourusername/gt2"
+"Bug Tracker" = "https://github.com/yourusername/gt2/issues"
+
+[project.scripts]
+gt-server = "gt.server.__main__:main"
+gt-worker = "gt.worker.__main__:main"
+
+[tool.setuptools]
+packages = ["gt", "gt.client", "gt.dispatcher", "gt.worker", "gt.server", "gt.transport"]
+
+[tool.setuptools.package-data]
+gt = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

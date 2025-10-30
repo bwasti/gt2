@@ -2,6 +2,34 @@
 
 Examples demonstrating GT features and usage patterns.
 
+## Quick Start: `gt.gpu_workers()` API (`simple_gpu_workers.py`)
+
+**The easiest way to use multiple GPUs!** Just one line before any tensor operations:
+
+```python
+import gt
+gt.gpu_workers(4)  # Use 4 GPUs
+
+a = gt.randn(128, 64)  # Auto-sharded across 4 workers
+b = gt.tensor(b_data)  # Broadcast to all workers
+c = a @ b              # Distributed computation
+```
+
+**Run it:**
+```bash
+python examples/simple_gpu_workers.py
+```
+
+**What it does:**
+- Automatically starts local dispatcher
+- Spawns 4 workers (one per GPU)
+- Enables automatic tensor sharding
+- No manual worker setup required!
+
+**Note:** For production with remote workers, use manual setup (see below).
+
+---
+
 ## Simple Auto-Shard (`simple_auto_shard.py`)
 
 Demonstrates automatic tensor sharding across multiple workers for distributed matrix multiplication.
@@ -15,6 +43,18 @@ python examples/simple_auto_shard.py
 This uses auto-connect mode which starts a local server with **1 worker only**. No sharding occurs.
 
 ### Running with Multiple Workers (distributed sharding)
+
+**Option 1: Server with auto-spawned workers (easiest)**
+
+```bash
+# Terminal 1 - Start server with 4 workers
+python -m gt.server -p 12345 --spawn_gpu_workers 4
+
+# Terminal 2 - Run example
+python examples/simple_auto_shard.py --distributed
+```
+
+**Option 2: Manual worker setup (more control)**
 
 **Terminal 1 - Start Server:**
 ```bash

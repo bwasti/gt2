@@ -239,10 +239,20 @@ class Dispatcher:
             return ClientResponse(success=True)
 
         # For ops with inputs
-        input_loc = self.tensor_handles.get_location(client_id, cmd.input_id)
-        if not input_loc:
+        input_locs = self.tensor_handles.get_locations(client_id, cmd.input_id)
+        if not input_locs:
             return ClientResponse(success=False, error="Input tensor not found")
 
+        # Check if tensor is sharded and operation is a reduction
+        is_sharded = len(input_locs) > 1
+        is_reduction = cmd.op in ["sum", "mean"]
+
+        if is_sharded and is_reduction:
+            # Distributed reduction - needs all-reduce
+            return self._handle_distributed_reduction(cmd, client_id, input_locs)
+
+        # Non-sharded case or non-reduction operation
+        input_loc = input_locs[0]
         worker = self._get_worker(input_loc.worker_id)
         if not worker:
             return ClientResponse(success=False, error="Worker not found")
@@ -417,6 +427,98 @@ class Dispatcher:
                 dtype=left_loc.dtype,
                 shard_info=shard_info
             )
+
+        return ClientResponse(success=True)
+
+    def _handle_distributed_reduction(self, cmd: UnaryOp, client_id: str, input_locs) -> ClientResponse:
+        """
+        Handle distributed reduction (sum/mean) on sharded tensor.
+
+        Each worker computes partial result, then we combine:
+        - sum: add all partial sums
+        - mean: weighted average based on shard sizes
+        """
+        import numpy as np
+
+        partial_results = []
+        shard_sizes = []
+
+        # Collect partial results from all workers
+        for loc in input_locs:
+            worker = self._get_worker(loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
+
+            # Ask worker to compute local reduction
+            result_tensor_id = f"{client_id}_{cmd.result_id}_partial_{loc.worker_id}"
+            worker_cmd = WorkerUnaryOp(
+                result_id=result_tensor_id,
+                op=cmd.op,  # sum or mean
+                input_id=loc.worker_tensor_id
+            )
+            worker["conn"].send(worker_cmd)
+            worker_response: WorkerResponse = worker["conn"].recv()
+
+            if not worker_response.success:
+                return ClientResponse(success=False, error=worker_response.error)
+
+            # Now get the data from the computed result
+            from gt.transport.protocol import WorkerGetData
+            get_cmd = WorkerGetData(tensor_id=result_tensor_id)
+            worker["conn"].send(get_cmd)
+            get_response: WorkerResponse = worker["conn"].recv()
+
+            if not get_response.success:
+                return ClientResponse(success=False, error=get_response.error)
+
+            partial_results.append(get_response.data)
+
+            # Track number of elements for mean calculation
+            if cmd.op == "mean" and loc.shard_info:
+                # Get total number of elements in this shard
+                num_elements = np.prod(loc.shape)
+                shard_sizes.append(num_elements)
+
+        # Combine partial results
+        if cmd.op == "sum":
+            # All-reduce: sum all partial sums
+            final_result = np.sum(partial_results)
+        elif cmd.op == "mean":
+            # Weighted average: sum of (partial_mean * num_elements) / total_elements
+            total_elements = sum(shard_sizes)
+            weighted_sum = sum(float(partial) * size for partial, size in zip(partial_results, shard_sizes))
+            final_result = weighted_sum / total_elements
+        else:
+            return ClientResponse(success=False, error=f"Unknown reduction op: {cmd.op}")
+
+        # Store result on first worker (could be any worker since it's a scalar)
+        first_worker = self._get_worker(input_locs[0].worker_id)
+        result_tensor_id = f"{client_id}_{cmd.result_id}"
+
+        # Create tensor from the scalar result
+        from gt.transport.protocol import WorkerCreateTensor
+        result_data = np.array(final_result, dtype=input_locs[0].dtype)
+        create_cmd = WorkerCreateTensor(
+            tensor_id=result_tensor_id,
+            data=result_data,
+            dtype=input_locs[0].dtype,
+            shape=result_data.shape
+        )
+        first_worker["conn"].send(create_cmd)
+        worker_response: WorkerResponse = first_worker["conn"].recv()
+
+        if not worker_response.success:
+            return ClientResponse(success=False, error=worker_response.error)
+
+        # Register result tensor (scalar shape)
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=first_worker["id"],
+            worker_tensor_id=result_tensor_id,
+            shape=result_data.shape,
+            dtype=input_locs[0].dtype
+        )
 
         return ClientResponse(success=True)
 

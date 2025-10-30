@@ -1,5 +1,5 @@
 """
-Worker executes operations using a backend (numpy, pytorch, jax).
+Worker executes operations using an Engine (numpy, pytorch, jax).
 
 Workers are dumb executors - they just run what dispatcher tells them.
 
@@ -12,32 +12,23 @@ from gt.transport.protocol import (
     WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
     WorkerGetData, WorkerFreeTensor, WorkerResponse
 )
+from gt.worker.engine import create_engine, Engine
 
 
 class Worker:
     """
-    Worker executes operations.
+    Worker executes operations using an Engine backend.
 
     Supports multiple backends: 'numpy', 'pytorch'
     """
 
     def __init__(self, worker_id: str, backend="pytorch"):
         self.worker_id = worker_id
-        self.backend = backend
-        self.tensors = {}  # Map: tensor_id -> tensor (numpy array or torch tensor)
+        self.backend_name = backend
+        self.tensors = {}  # Map: tensor_id -> tensor
 
-        # Initialize backend
-        if backend == "pytorch":
-            try:
-                import torch
-                self.torch = torch
-                self.device = torch.device('cpu')  # TODO: support GPU
-            except ImportError:
-                print(f"Warning: PyTorch not available, falling back to numpy")
-                self.backend = "numpy"
-                self.torch = None
-        else:
-            self.torch = None
+        # Create engine
+        self.engine: Engine = create_engine(backend)
 
     def connect_to_dispatcher(self, dispatcher_host="localhost", dispatcher_port=9000):
         """Connect to dispatcher and start processing."""
@@ -74,11 +65,7 @@ class Worker:
 
     def _handle_create_tensor(self, cmd: WorkerCreateTensor) -> WorkerResponse:
         """Create a tensor."""
-        if self.backend == "pytorch":
-            # Convert numpy to torch
-            self.tensors[cmd.tensor_id] = self.torch.from_numpy(cmd.data).to(self.device)
-        else:
-            self.tensors[cmd.tensor_id] = cmd.data
+        self.tensors[cmd.tensor_id] = self.engine.create_tensor(cmd.data)
         return WorkerResponse(success=True)
 
     def _handle_binary_op(self, cmd: WorkerBinaryOp) -> WorkerResponse:
@@ -89,22 +76,23 @@ class Worker:
         left = self.tensors[cmd.left_id]
         right = self.tensors[cmd.right_id]
 
-        # Execute operation
+        # Execute operation using engine
         if cmd.op == "add":
-            result = left + right
+            result = self.engine.add(left, right)
         elif cmd.op == "sub":
-            result = left - right
+            result = left - right  # TODO: add to engine
         elif cmd.op == "mul":
-            result = left * right
+            result = self.engine.mul(left, right)
         elif cmd.op == "div":
-            result = left / right
+            result = left / right  # TODO: add to engine
         elif cmd.op == "matmul":
-            result = left @ right
+            result = self.engine.matmul(left, right)
         elif cmd.op == "gt":
-            if self.backend == "pytorch":
-                result = (left > right).float()
+            result = (left > right)  # TODO: add to engine
+            if self.backend_name == "pytorch":
+                result = result.float()
             else:
-                result = (left > right).astype(np.float32)
+                result = result.astype(np.float32)
         else:
             return WorkerResponse(success=False, error=f"Unknown op: {cmd.op}")
 
@@ -115,24 +103,19 @@ class Worker:
         """Execute unary operation."""
         # Operations that create new data
         if cmd.input_id is None:
-            if self.backend == "pytorch":
-                if cmd.op == "randn":
-                    result = self.torch.randn(*cmd.shape, device=self.device)
-                elif cmd.op == "zeros":
-                    result = self.torch.zeros(*cmd.shape, device=self.device)
-                elif cmd.op == "ones":
-                    result = self.torch.ones(*cmd.shape, device=self.device)
+            if cmd.op == "randn":
+                result = self.engine.randn(cmd.shape, cmd.dtype)
+            elif cmd.op == "zeros":
+                result = self.engine.zeros(cmd.shape, cmd.dtype)
+            elif cmd.op == "ones":
+                # TODO: add ones() to engine
+                if self.backend_name == "pytorch":
+                    import torch
+                    result = torch.ones(*cmd.shape)
                 else:
-                    return WorkerResponse(success=False, error=f"Unknown creation op: {cmd.op}")
-            else:
-                if cmd.op == "randn":
-                    result = np.random.randn(*cmd.shape).astype(cmd.dtype)
-                elif cmd.op == "zeros":
-                    result = np.zeros(cmd.shape, dtype=cmd.dtype)
-                elif cmd.op == "ones":
                     result = np.ones(cmd.shape, dtype=cmd.dtype)
-                else:
-                    return WorkerResponse(success=False, error=f"Unknown creation op: {cmd.op}")
+            else:
+                return WorkerResponse(success=False, error=f"Unknown creation op: {cmd.op}")
 
             self.tensors[cmd.result_id] = result
             return WorkerResponse(success=True)
@@ -143,40 +126,22 @@ class Worker:
 
         input_tensor = self.tensors[cmd.input_id]
 
-        if self.backend == "pytorch":
-            if cmd.op == "exp":
-                result = self.torch.exp(input_tensor)
-            elif cmd.op == "log":
-                result = self.torch.log(input_tensor)
-            elif cmd.op == "sum":
-                result = self.torch.sum(input_tensor)
-            elif cmd.op == "mean":
-                result = self.torch.mean(input_tensor)
-            elif cmd.op == "relu":
-                result = self.torch.relu(input_tensor)
-            elif cmd.op == "sigmoid":
-                result = self.torch.sigmoid(input_tensor)
-            elif cmd.op == "tanh":
-                result = self.torch.tanh(input_tensor)
-            else:
-                return WorkerResponse(success=False, error=f"Unknown op: {cmd.op}")
+        if cmd.op == "exp":
+            result = np.exp(input_tensor) if self.backend_name == "numpy" else input_tensor.exp()  # TODO: add to engine
+        elif cmd.op == "log":
+            result = np.log(input_tensor) if self.backend_name == "numpy" else input_tensor.log()  # TODO: add to engine
+        elif cmd.op == "sum":
+            result = self.engine.sum(input_tensor)
+        elif cmd.op == "mean":
+            result = self.engine.mean(input_tensor)
+        elif cmd.op == "relu":
+            result = self.engine.relu(input_tensor)
+        elif cmd.op == "sigmoid":
+            result = self.engine.sigmoid(input_tensor)
+        elif cmd.op == "tanh":
+            result = self.engine.tanh(input_tensor)
         else:
-            if cmd.op == "exp":
-                result = np.exp(input_tensor)
-            elif cmd.op == "log":
-                result = np.log(input_tensor)
-            elif cmd.op == "sum":
-                result = np.sum(input_tensor)
-            elif cmd.op == "mean":
-                result = np.mean(input_tensor)
-            elif cmd.op == "relu":
-                result = np.maximum(0, input_tensor)
-            elif cmd.op == "sigmoid":
-                result = 1.0 / (1.0 + np.exp(-input_tensor))
-            elif cmd.op == "tanh":
-                result = np.tanh(input_tensor)
-            else:
-                return WorkerResponse(success=False, error=f"Unknown op: {cmd.op}")
+            return WorkerResponse(success=False, error=f"Unknown op: {cmd.op}")
 
         self.tensors[cmd.result_id] = result
         return WorkerResponse(success=True)
@@ -186,11 +151,10 @@ class Worker:
         if cmd.tensor_id not in self.tensors:
             return WorkerResponse(success=False, error="Tensor not found")
 
-        data = self.tensors[cmd.tensor_id]
+        tensor = self.tensors[cmd.tensor_id]
 
         # Convert to numpy for transport
-        if self.backend == "pytorch":
-            data = data.cpu().numpy()
+        data = self.engine.to_numpy(tensor)
 
         return WorkerResponse(success=True, data=data)
 
