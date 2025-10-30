@@ -27,19 +27,19 @@ python -c "import datasets" 2>/dev/null || {
 echo ""
 echo "Step 1: Loading weights from HuggingFace..."
 echo "========================================"
-python examples/qwen3/load_weights.py
+python load_weights.py
 
 # Step 2: Prepare training data
 echo ""
 echo "Step 2: Preparing training data..."
 echo "========================================"
-python examples/qwen3/prepare_data.py
+python prepare_data.py
 
 # Step 3: Train the model
 echo ""
 echo "Step 3: Training model..."
 echo "========================================"
-python examples/qwen3/train.py
+python train.py
 
 echo ""
 echo "========================================"
