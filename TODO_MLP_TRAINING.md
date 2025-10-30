@@ -112,6 +112,81 @@ This makes it easy to:
 - Identify slow operations (large timestamp gaps)
 - Understand the full command flow through the system
 
+## Next Steps / TODO
+
+### 1. Refactor Dispatcher Optimizations
+**Goal**: Abstract distributed operation logic into separate, reusable modules
+
+Current issues:
+- Distributed matmul, reduction, and sharding logic is embedded in dispatcher.py
+- Hard to maintain and extend
+- Need to support tensor movement between workers
+
+**Tasks**:
+- [ ] Create `gt/dispatcher/distributed_ops.py` for distributed operation handlers
+  - Extract `_handle_distributed_matmul()` logic
+  - Extract `_handle_distributed_reduction()` logic
+  - Extract `_handle_sharded_creation()` logic
+- [ ] Create `gt/dispatcher/tensor_placement.py` for tensor movement
+  - Implement "move" operation to relocate tensors between workers
+  - Automatic insertion of move ops when tensors are on different workers
+- [ ] Enhance `ShardInfo` to support:
+  - Multi-dimensional sharding (not just axis 0)
+  - Replication (for FSDP-style patterns)
+  - Add fields: `replicated: bool`, `shard_pattern: List[Optional[int]]`
+
+**Benefits**:
+- Cleaner dispatcher.py (focus on routing)
+- Reusable distributed primitives
+- Easier to add new distributed patterns
+
+### 2. Worker Instruction Batching for Compilation
+**Goal**: Allow workers to accumulate instructions before execution to enable compilation
+
+**Motivation**:
+- PyTorch can compile graphs (torch.compile)
+- Batching instructions exposes more opportunities for optimization
+- Numpy doesn't support this, so need engine-specific implementations
+
+**Tasks**:
+- [ ] Refactor engine interface into separate files:
+  - Create `worker/engine/pytorch.py` with compilation support
+  - Create `worker/engine/numpy.py` without compilation
+  - Create `worker/engine/base.py` for shared Engine interface
+- [ ] Add instruction batching to worker:
+  - Worker accumulates N instructions before processing
+  - Configurable batch size (default: 1 for eager mode)
+  - Flush on sync points (GetData, FreeTensor, etc.)
+- [ ] Implement compilation in PyTorch engine:
+  - Build computation graph from batched instructions
+  - Use `torch.compile()` to optimize
+  - Cache compiled functions
+- [ ] Add configuration:
+  - Environment variable: `GT_WORKER_BATCH_SIZE`
+  - CLI arg for manual worker: `--batch-size N`
+
+**Example flow**:
+```python
+# Worker receives:
+1. BinaryOp(result=3, op=add, left=1, right=2)
+2. UnaryOp(result=4, op=relu, input=3)
+3. BinaryOp(result=5, op=mul, left=4, right=2)
+
+# Instead of executing one-by-one, batch into:
+def compiled_graph(t1, t2):
+    t3 = t1 + t2
+    t4 = relu(t3)
+    t5 = t4 * t2
+    return t5
+
+# torch.compile(compiled_graph) runs once
+```
+
+**Benefits**:
+- Faster execution via kernel fusion
+- Reduced Python overhead
+- Unlocks GPU optimizations (memory reuse, pipelining)
+
 ## Known Issues to Fix Later
 
 1. **Exception propagation**: Errors from dispatcher/worker should propagate cleanly to client
