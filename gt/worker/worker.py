@@ -6,13 +6,15 @@ Workers are dumb executors - they just run what dispatcher tells them.
 Keep this SIMPLE and READABLE.
 """
 
+import os
 import numpy as np
+from typing import List, Dict, Any
 from gt.transport.connection import connect, Connection
 from gt.transport.protocol import (
     WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
     WorkerGetData, WorkerFreeTensor, WorkerResponse
 )
-from gt.worker.engine import create_engine, Engine
+from gt.worker.engine import create_engine, Engine, Operation
 
 
 class Worker:
@@ -20,15 +22,33 @@ class Worker:
     Worker executes operations using an Engine backend.
 
     Supports multiple backends: 'numpy', 'pytorch'
+    Supports instruction batching for compilation (PyTorch only).
     """
 
-    def __init__(self, worker_id: str, backend="pytorch"):
+    def __init__(self, worker_id: str, backend="pytorch", batch_size: int = None):
         self.worker_id = worker_id
         self.backend_name = backend
         self.tensors = {}  # Map: tensor_id -> tensor
 
+        # Instruction batching configuration
+        if batch_size is None:
+            # Read from environment variable or default to 1 (eager mode)
+            batch_size = int(os.environ.get('GT_WORKER_BATCH_SIZE', '1'))
+        self.batch_size = batch_size
+
+        # Batch accumulator for compilation
+        self.pending_operations: List[tuple] = []  # (cmd, response_placeholder)
+
         # Create engine
         self.engine: Engine = create_engine(backend)
+
+        # Log batching mode
+        if self.batch_size > 1 and self.engine.supports_batching():
+            print(f"Worker {self.worker_id}: Batching enabled (batch_size={self.batch_size})")
+        elif self.batch_size > 1 and not self.engine.supports_batching():
+            print(f"Worker {self.worker_id}: Batching requested (batch_size={self.batch_size}) but engine doesn't support it")
+        else:
+            print(f"Worker {self.worker_id}: Eager mode (batch_size={self.batch_size})")
 
     def connect_to_dispatcher(self, dispatcher_host="localhost", dispatcher_port=9000):
         """Connect to dispatcher and start processing."""
@@ -46,14 +66,45 @@ class Worker:
                 break
 
     def _process_command(self, cmd: WorkerCommand) -> WorkerResponse:
-        """Process a command from dispatcher."""
+        """
+        Process a command from dispatcher.
+
+        Batching logic:
+        - Batchable ops (BinaryOp, UnaryOp on existing tensors) are accumulated
+        - Batch is flushed when full or sync point is hit
+        - Sync points: CreateTensor, GetData, FreeTensor
+        """
         try:
+            # Determine if this is a batchable operation
+            is_batchable = self._is_batchable(cmd)
+            is_sync_point = not is_batchable
+
+            # Flush batch if:
+            # 1. Sync point reached, OR
+            # 2. Batch is full, OR
+            # 3. Engine doesn't support batching
+            should_flush = (
+                is_sync_point or
+                len(self.pending_operations) >= self.batch_size or
+                not self.engine.supports_batching()
+            )
+
+            if should_flush and self.pending_operations:
+                self._flush_batch()
+
+            # Handle the current command
             if isinstance(cmd, WorkerCreateTensor):
                 return self._handle_create_tensor(cmd)
             elif isinstance(cmd, WorkerBinaryOp):
-                return self._handle_binary_op(cmd)
+                if is_batchable and self.engine.supports_batching():
+                    return self._add_to_batch(cmd)
+                else:
+                    return self._handle_binary_op(cmd)
             elif isinstance(cmd, WorkerUnaryOp):
-                return self._handle_unary_op(cmd)
+                if is_batchable and self.engine.supports_batching():
+                    return self._add_to_batch(cmd)
+                else:
+                    return self._handle_unary_op(cmd)
             elif isinstance(cmd, WorkerGetData):
                 return self._handle_get_data(cmd)
             elif isinstance(cmd, WorkerFreeTensor):
@@ -62,6 +113,70 @@ class Worker:
                 return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
         except Exception as e:
             return WorkerResponse(success=False, error=str(e))
+
+    def _is_batchable(self, cmd: WorkerCommand) -> bool:
+        """Check if a command can be batched for compilation."""
+        if isinstance(cmd, (WorkerBinaryOp,)):
+            return True
+        if isinstance(cmd, WorkerUnaryOp):
+            # Only batch operations on existing tensors, not creation ops
+            return cmd.input_id is not None
+        return False
+
+    def _add_to_batch(self, cmd: WorkerCommand) -> WorkerResponse:
+        """
+        Add an operation to the pending batch.
+        Returns success immediately - actual execution is deferred.
+        """
+        self.pending_operations.append(cmd)
+
+        # Check if batch is now full
+        if len(self.pending_operations) >= self.batch_size:
+            self._flush_batch()
+
+        return WorkerResponse(success=True)
+
+    def _flush_batch(self):
+        """
+        Execute all pending operations as a batch using engine.execute_batch().
+        """
+        if not self.pending_operations:
+            return
+
+        # Convert commands to Operation objects
+        operations = []
+        for cmd in self.pending_operations:
+            if isinstance(cmd, WorkerBinaryOp):
+                operations.append(Operation(
+                    op_type='binary',
+                    op_name=cmd.op,
+                    result_id=cmd.result_id,
+                    input_ids=[cmd.left_id, cmd.right_id],
+                    params={}
+                ))
+            elif isinstance(cmd, WorkerUnaryOp):
+                operations.append(Operation(
+                    op_type='unary',
+                    op_name=cmd.op,
+                    result_id=cmd.result_id,
+                    input_ids=[cmd.input_id],
+                    params={'shape': cmd.shape, 'dtype': cmd.dtype}
+                ))
+
+        # Execute batch
+        try:
+            results = self.engine.execute_batch(operations, self.tensors)
+
+            # Update tensor storage with results
+            for result_id, tensor in results.items():
+                self.tensors[result_id] = tensor
+
+        except Exception as e:
+            print(f"Worker {self.worker_id}: Batch execution failed: {e}")
+            raise
+        finally:
+            # Clear pending operations
+            self.pending_operations.clear()
 
     def _handle_create_tensor(self, cmd: WorkerCreateTensor) -> WorkerResponse:
         """Create a tensor."""

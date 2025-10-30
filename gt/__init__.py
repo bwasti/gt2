@@ -153,8 +153,11 @@ def _ensure_connected():
                 import os
                 os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
-                # Use PyTorch backend for multi-worker (sharding), numpy for single worker
-                backend = 'pytorch' if num_workers > 1 else 'numpy'
+                # Use PyTorch backend for:
+                # 1. Multi-worker mode (for sharding), OR
+                # 2. When batching is requested (GT_WORKER_BATCH_SIZE > 1)
+                batch_size = int(os.environ.get('GT_WORKER_BATCH_SIZE', '1'))
+                backend = 'pytorch' if (num_workers > 1 or batch_size > 1) else 'numpy'
                 worker = Worker(worker_id=worker_id, backend=backend)
                 worker.connect_to_dispatcher(dispatcher_host='localhost', dispatcher_port=actual_port)
             return run_worker
