@@ -24,6 +24,7 @@ class CreateTensor(ClientCommand):
     data: Any  # serialized numpy array or similar
     dtype: str
     shape: tuple
+    signal: Optional[str] = None  # Signal name for sharding config
 
 
 @dataclass
@@ -33,6 +34,7 @@ class BinaryOp(ClientCommand):
     op: str  # "add", "mul", "matmul", etc.
     left_id: int
     right_id: int
+    signal: Optional[str] = None  # Signal name for sharding config
 
 
 @dataclass
@@ -43,6 +45,7 @@ class UnaryOp(ClientCommand):
     input_id: Optional[int]  # None for ops like randn that create data
     shape: Optional[tuple] = None  # for randn, etc.
     dtype: Optional[str] = None
+    signal: Optional[str] = None  # Signal name for sharding config
 
 
 @dataclass

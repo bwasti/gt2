@@ -252,7 +252,12 @@ def _binary_op(op: str, left, right) -> Tensor:
     requires_grad = left.requires_grad or right.requires_grad
 
     result = Tensor(requires_grad=requires_grad)
-    cmd = BinaryOp(result_id=result.id, op=op, left_id=left.id, right_id=right.id)
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
+    cmd = BinaryOp(result_id=result.id, op=op, left_id=left.id, right_id=right.id, signal=signal_name)
     with _connection_lock:
         # Process any pending frees first
         _process_free_queue()
@@ -376,7 +381,12 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
     requires_grad = input_tensor.requires_grad
 
     result = Tensor(requires_grad=requires_grad)
-    cmd = UnaryOp(result_id=result.id, op=op, input_id=input_tensor.id)
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
+    cmd = UnaryOp(result_id=result.id, op=op, input_id=input_tensor.id, signal=signal_name)
     with _connection_lock:
         # Process any pending frees first
         _process_free_queue()
@@ -499,11 +509,17 @@ def from_numpy(array: np.ndarray, requires_grad: bool = False) -> Tensor:
         raise RuntimeError("Not connected to dispatcher")
 
     tensor = Tensor(shape=array.shape, dtype=str(array.dtype), requires_grad=requires_grad)
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
     cmd = CreateTensor(
         tensor_id=tensor.id,
         data=array,
         dtype=str(array.dtype),
-        shape=array.shape
+        shape=array.shape,
+        signal=signal_name
     )
     with _connection_lock:
         # Process any pending frees first
@@ -526,12 +542,18 @@ def randn(*shape, dtype="float32") -> Tensor:
         raise RuntimeError("Not connected to dispatcher")
 
     tensor = Tensor(shape=shape, dtype=dtype)
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
     cmd = UnaryOp(
         result_id=tensor.id,
         op="randn",
         input_id=None,
         shape=shape,
-        dtype=dtype
+        dtype=dtype,
+        signal=signal_name
     )
     with _connection_lock:
         # Process any pending frees first
@@ -554,12 +576,18 @@ def zeros(*shape, dtype="float32") -> Tensor:
         raise RuntimeError("Not connected to dispatcher")
 
     tensor = Tensor(shape=shape, dtype=dtype)
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
     cmd = UnaryOp(
         result_id=tensor.id,
         op="zeros",
         input_id=None,
         shape=shape,
-        dtype=dtype
+        dtype=dtype,
+        signal=signal_name
     )
     with _connection_lock:
         # Process any pending frees first

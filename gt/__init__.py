@@ -296,6 +296,14 @@ class no_grad:
         pass
 
 
+# Signal API for configuration-based sharding
+from gt import signal  # Import module for signal.enter() / signal.exit()
+from gt.signal import signal_tensor  # Import function for gt.signal_tensor()
+
+# Config loading
+from gt.config import load_config, get_config, get_signal_config
+
+
 # Cleanup on exit
 def _cleanup():
     global _client, _auto_server

@@ -1,0 +1,56 @@
+# Example sharding configuration for GT
+#
+# This file demonstrates how to configure sharding strategies for different
+# signal scopes in your computation graph.
+
+# Forward pass for layer 1 - shard across all 4 workers
+forward_layer1:
+  shard:
+    axis: 0  # Shard along batch dimension
+    workers: [0, 1, 2, 3]  # Use all workers
+  backward: backward_layer1  # Use different config for backward
+
+# Backward pass for layer 1 - same sharding as forward
+backward_layer1:
+  shard:
+    axis: 0
+    workers: [0, 1, 2, 3]
+
+# Pipeline parallelism example - stage 1 on first 2 workers
+pipeline_stage_1:
+  shard:
+    axis: 0
+    workers: [0, 1]  # First two workers
+  backward: pipeline_stage_1_bwd
+
+# Pipeline stage 1 backward - on different workers (last 2)
+pipeline_stage_1_bwd:
+  shard:
+    axis: 0
+    workers: [2, 3]  # Last two workers
+
+# Pipeline parallelism example - stage 2 on last 2 workers
+pipeline_stage_2:
+  shard:
+    axis: 0
+    workers: [2, 3]  # Last two workers
+  backward: pipeline_stage_2_bwd
+
+# Pipeline stage 2 backward - on first workers
+pipeline_stage_2_bwd:
+  shard:
+    axis: 0
+    workers: [0, 1]  # First two workers
+
+# Example: Replicated tensor (same data on all workers)
+replicated_weights:
+  shard:
+    axis: 0
+    workers: null  # null means all workers
+    replicated: true  # Replicate instead of sharding
+
+# Example: Sharding along feature dimension instead of batch
+feature_parallel:
+  shard:
+    axis: 1  # Shard along feature dimension
+    workers: [0, 1]
