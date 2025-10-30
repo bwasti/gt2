@@ -1,0 +1,140 @@
+"""
+Protocol definitions for communication between components.
+
+Keep this SIMPLE and READABLE.
+"""
+
+from dataclasses import dataclass
+from typing import Any, Optional
+import pickle
+
+
+# Client <-> Dispatcher Protocol (simpler)
+
+@dataclass
+class ClientCommand:
+    """Base class for commands from client to dispatcher."""
+    pass
+
+
+@dataclass
+class CreateTensor(ClientCommand):
+    """Create a new tensor with data."""
+    tensor_id: int
+    data: Any  # serialized numpy array or similar
+    dtype: str
+    shape: tuple
+
+
+@dataclass
+class BinaryOp(ClientCommand):
+    """Binary operation: result = op(left, right)."""
+    result_id: int
+    op: str  # "add", "mul", "matmul", etc.
+    left_id: int
+    right_id: int
+
+
+@dataclass
+class UnaryOp(ClientCommand):
+    """Unary operation: result = op(input)."""
+    result_id: int
+    op: str  # "randn", "exp", "log", etc.
+    input_id: Optional[int]  # None for ops like randn that create data
+    shape: Optional[tuple] = None  # for randn, etc.
+    dtype: Optional[str] = None
+
+
+@dataclass
+class GetData(ClientCommand):
+    """Request data for a tensor."""
+    tensor_id: int
+
+
+@dataclass
+class FreeTensor(ClientCommand):
+    """Free a tensor (garbage collection)."""
+    tensor_id: int
+
+
+@dataclass
+class ClientResponse:
+    """Response from dispatcher to client."""
+    success: bool
+    data: Any = None  # For GetData responses
+    error: Optional[str] = None
+
+
+# Dispatcher <-> Worker Protocol (more precise)
+
+@dataclass
+class WorkerCommand:
+    """Base class for commands from dispatcher to worker."""
+    pass
+
+
+@dataclass
+class WorkerCreateTensor(WorkerCommand):
+    """Create tensor on worker."""
+    tensor_id: str  # worker-local ID (dispatcher tracks mapping)
+    data: Any
+    dtype: str
+    shape: tuple
+
+
+@dataclass
+class WorkerBinaryOp(WorkerCommand):
+    """Execute binary operation on worker."""
+    result_id: str
+    op: str
+    left_id: str
+    right_id: str
+
+
+@dataclass
+class WorkerUnaryOp(WorkerCommand):
+    """Execute unary operation on worker."""
+    result_id: str
+    op: str
+    input_id: Optional[str]
+    shape: Optional[tuple] = None
+    dtype: Optional[str] = None
+
+
+@dataclass
+class WorkerGetData(WorkerCommand):
+    """Get tensor data from worker."""
+    tensor_id: str
+
+
+@dataclass
+class WorkerFreeTensor(WorkerCommand):
+    """Free tensor on worker."""
+    tensor_id: str
+
+
+@dataclass
+class WorkerMoveTensor(WorkerCommand):
+    """Move tensor to another worker."""
+    tensor_id: str
+    target_worker: str  # worker address
+
+
+@dataclass
+class WorkerResponse:
+    """Response from worker to dispatcher."""
+    success: bool
+    data: Any = None
+    error: Optional[str] = None
+
+
+# Serialization helpers
+
+def serialize(obj):
+    """Serialize object for network transmission."""
+    return pickle.dumps(obj)
+
+
+def deserialize(data):
+    """Deserialize object from network transmission."""
+    return pickle.loads(data)
