@@ -1,47 +1,46 @@
 # GT2 - Graph Tensor System
 
-**A distributed tensor framework with PyTorch-like API that scales from 1 to 72+ GPUs.**
+A distributed tensor framework with a PyTorch-like API.
 
-Key features:
-- 🚀 **5000x speedup** with instruction batching + torch.compile()
-- 🎯 **Signal-based sharding** - Configure data/model/pipeline parallelism via YAML
-- 🔥 **Full autograd** - Tape-based automatic differentiation
-- ⚡ **Zero code changes** to scale across GPUs
-- 🎓 **Simple & readable** - Designed for ML researchers
+## Features
 
-## 🎯 Quick Start
+- **Instruction batching with torch.compile()** - Accumulate operations and compile with PyTorch's JIT
+- **Signal-based sharding** - Configure data/model/pipeline parallelism via YAML
+- **Autograd support** - Tape-based automatic differentiation
+- **Distributed execution** - Client-dispatcher-worker architecture
+- **PyTorch-compatible API** - Familiar syntax for tensor operations
+
+## Quick Start
 
 ```python
 import gt
 
-# Auto-starts local server - no setup needed!
+# Auto-starts local server
 a = gt.randn(1000, 1000)
 b = gt.randn(1000, 1000)
 c = a @ b
 result = c.data.numpy()
 ```
 
-That's it! For distributed training, see [Distributed Setup](#distributed-setup).
+For distributed training, see [Distributed Setup](#distributed-setup).
 
-## ✨ Key Features
+## Instruction Batching & torch.compile
 
-### 🚀 Instruction Batching & torch.compile (5000x Speedup!)
-
-Workers batch operations and compile them with `torch.compile()` for dramatic speedups:
+Workers can batch operations and compile them with `torch.compile()`:
 
 ```bash
 # Enable batching (default: eager mode)
 GT_WORKER_BATCH_SIZE=10 python your_script.py
 ```
 
-**Performance:**
-- First compilation: ~10s (one-time cost)
-- Cached execution: **~1.5ms** (5000x faster!)
-- Identical computation patterns reuse cached compiled functions
+**Behavior:**
+- First execution: Compilation overhead (~10s observed in tests)
+- Subsequent executions: Faster execution via cached compiled functions
+- Performance varies based on operation patterns and hardware
 
 See [docs/BATCHING_AND_COMPILATION.md](docs/BATCHING_AND_COMPILATION.md) for details.
 
-### 🎯 Signal-Based Sharding Configuration
+## Signal-Based Sharding Configuration
 
 Control tensor placement across workers using named signals and YAML configs:
 
@@ -50,19 +49,19 @@ Control tensor placement across workers using named signals and YAML configs:
 forward_layer1:
   shard:
     axis: 0                  # Shard batch dimension
-    workers: [0, 1, 2, 3]    # Use all 4 GPUs
+    workers: [0, 1, 2, 3]    # Use workers 0-3
   backward: backward_layer1  # Different config for gradients
 
 pipeline_stage_1:
   shard:
     axis: 0
-    workers: [0, 1]          # Stage 1 on first 2 GPUs
+    workers: [0, 1]          # Stage 1 on workers 0-1
   backward: pipeline_stage_1_bwd
 
 pipeline_stage_1_bwd:
   shard:
     axis: 0
-    workers: [2, 3]          # Backward on last 2 GPUs (pipeline parallelism!)
+    workers: [2, 3]          # Backward on workers 2-3
 ```
 
 ```python
@@ -84,7 +83,7 @@ with gt.signal.context('pipeline_stage_1', backward='pipeline_stage_1_bwd'):
     loss.backward()  # Gradients computed on workers [2,3]
 ```
 
-**Supports:**
+**Supported configurations:**
 - Data parallelism (batch sharding)
 - Model parallelism (feature sharding)
 - Pipeline parallelism (stage-wise worker assignment)
@@ -94,9 +93,9 @@ with gt.signal.context('pipeline_stage_1', backward='pipeline_stage_1_bwd'):
 
 See [examples/README_SIGNALS.md](examples/README_SIGNALS.md) for comprehensive guide.
 
-### 🔥 Full Autograd Support
+## Autograd Support
 
-Train neural networks with automatic differentiation:
+Tape-based automatic differentiation:
 
 ```python
 from gt.nn import Module, Linear, SGD
@@ -116,36 +115,28 @@ model = MLP()
 optimizer = SGD(model.parameters(), lr=0.01)
 
 for epoch in range(100):
-    # Forward pass
     pred = model(X_train)
     loss = ((pred - y_train) ** 2).mean()
-
-    # Backward pass
     loss.backward()
-
-    # Update parameters
     optimizer.step()
     optimizer.zero_grad()
-
-    print(f"Epoch {epoch}: loss = {loss.item():.4f}")
-# Output: Epoch 99: loss = 0.0274 ✅
 ```
 
-**Features:**
-- Tape-based autograd (like PyTorch)
-- Full gradient computation with broadcasting
+**Implemented:**
+- Tape-based autograd (PyTorch-style)
+- Gradient computation with broadcasting
 - In-place parameter updates
-- Optimizers: SGD (more coming soon)
+- SGD optimizer
 
-### 📊 Instruction Stream Logging
+## Instruction Stream Logging
 
-Debug and profile with comprehensive operation logging:
+Operations can be logged with timestamps:
 
 ```bash
 GT_INSTRUCTION_LOG=ops.log python your_script.py
 ```
 
-Output shows every operation with timestamps:
+Output format:
 ```
 [TAPE 0.003s] RECV         | 127.0.0.1:59712 | BinaryOp  | result=2 op=matmul left=0 right=1
 [TAPE 0.003s] WORKER_SEND  | auto_worker     | WorkerOp  | op=matmul result=127.0.0.1:59712_2
@@ -153,22 +144,41 @@ Output shows every operation with timestamps:
 [TAPE 0.004s] SEND         | 127.0.0.1:59712 | BinaryOp  | success=True
 ```
 
-Perfect for:
-- Debugging hangs (see the last operation before timeout)
+Useful for:
+- Debugging hangs (see last operation before timeout)
 - Identifying slow operations (large timestamp gaps)
 - Understanding distributed execution flow
 
-### ⚡ Multiple Backends
+## Debug Utilities
 
-- **PyTorch** (default): Fast, supports GPU, compilation, distributed primitives
-- **NumPy**: CPU-only reference implementation for debugging
+Inspect internal state:
 
-Workers automatically select PyTorch when batching is enabled.
+```python
+import gt
 
-## 📦 Installation
+# Create tensors with gradients
+a = gt.randn(10, 10, requires_grad=True)
+b = gt.randn(10, 10, requires_grad=True)
+loss = (a + b).sum()
+
+# View autograd tape
+gt.debug.print_tape()
+
+# View worker statistics
+gt.debug.print_worker_stats()
+```
+
+## Multiple Backends
+
+- **PyTorch**: GPU support, compilation, distributed primitives
+- **NumPy**: CPU-only reference implementation
+
+Workers use PyTorch when batching is enabled or multiple workers are present.
+
+## Installation
 
 ```bash
-# Clone the repository
+# Clone repository
 git clone https://github.com/bwasti/gt2.git
 cd gt2
 
@@ -179,11 +189,9 @@ pip install -r requirements.txt
 pip install torch
 ```
 
-## 🚀 Usage
+## Usage
 
-### Simple (Auto-Server)
-
-Perfect for local development and single-GPU workloads:
+### Auto-Server Mode
 
 ```python
 import gt
@@ -195,18 +203,15 @@ c = a + b
 data = c.data.numpy()  # [6, 8, 10, 12]
 ```
 
-Configure number of workers:
+Configure multiple workers:
 ```python
 import gt
-gt.gpu_workers(4)  # Use 4 workers (must call before any tensor operations)
+gt.gpu_workers(4)  # Must call before tensor operations
 
-# Now tensors can be sharded across 4 workers
 a = gt.randn(1000, 1000)
 ```
 
 ### Distributed Setup
-
-For production or multi-GPU/multi-node clusters:
 
 **Terminal 1 - Start dispatcher:**
 ```bash
@@ -221,25 +226,21 @@ CUDA_VISIBLE_DEVICES=0 python -m gt.worker --host localhost -p 12345
 # Worker 1 (GPU 1)
 CUDA_VISIBLE_DEVICES=1 python -m gt.worker --host localhost -p 12345
 
-# Worker 2 (GPU 2) on another machine
+# Worker on another machine
 CUDA_VISIBLE_DEVICES=0 python -m gt.worker --host <dispatcher_host> -p 12345
 ```
 
-**Terminal N - Run your code:**
+**Terminal N - Run code:**
 ```python
 import gt
 
 gt.connect('localhost:12345')
 a = gt.randn(10000, 10000)
 b = gt.randn(10000, 10000)
-c = a @ b  # Computed across all connected workers
+c = a @ b
 ```
 
-Scale to **72+ GPUs across 36 nodes** by starting more workers!
-
-## 🧪 Environment Variables
-
-Configure GT behavior via environment variables:
+## Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -247,7 +248,7 @@ Configure GT behavior via environment variables:
 | `GT_CONFIG` | Path to sharding config YAML | None |
 | `GT_INSTRUCTION_LOG` | Path to instruction stream log file | None |
 
-**Example:**
+Example:
 ```bash
 GT_WORKER_BATCH_SIZE=10 \
 GT_CONFIG=sharding.yaml \
@@ -255,11 +256,9 @@ GT_INSTRUCTION_LOG=debug.log \
 python train.py
 ```
 
-## 📚 API Reference
+## API Reference
 
 ### Tensor Operations
-
-All standard operations supported with autograd:
 
 **Arithmetic:** `+`, `-`, `*`, `/`, `@` (matmul)
 **Activations:** `relu()`, `sigmoid()`, `tanh()`
@@ -273,7 +272,6 @@ All standard operations supported with autograd:
 ```python
 from gt.nn import Module, Linear, SGD
 
-# Define models
 class MyModel(Module):
     def __init__(self):
         super().__init__()
@@ -284,7 +282,6 @@ class MyModel(Module):
         x = self.layer1(x).relu()
         return self.layer2(x)
 
-# Optimizers
 optimizer = SGD(model.parameters(), lr=0.01)
 ```
 
@@ -292,7 +289,7 @@ optimizer = SGD(model.parameters(), lr=0.01)
 
 ```python
 # Enable gradients
-a = gt.tensor([1.0, 2.0, 3.0], requires_grad=True)
+a = gt.randn(3, 4, requires_grad=True)
 b = gt.from_numpy(np.array(...), requires_grad=True)
 
 # Forward pass
@@ -302,7 +299,7 @@ loss = (a * 2).sum()
 loss.backward()
 
 # Access gradients
-print(a.grad.data.numpy())  # [2, 2, 2]
+print(a.grad.data.numpy())  # [2, 2, 2, ...]
 ```
 
 ### Signal-Based Sharding
@@ -310,8 +307,7 @@ print(a.grad.data.numpy())  # [2, 2, 2]
 ```python
 # Load config
 gt.load_config('sharding.yaml')
-# Or use environment variable:
-# os.environ['GT_CONFIG'] = 'sharding.yaml'
+# Or: os.environ['GT_CONFIG'] = 'sharding.yaml'
 
 # Context manager
 with gt.signal.context('layer1'):
@@ -326,7 +322,7 @@ x = gt.randn(100, 64)
 gt.signal.exit('layer1')
 ```
 
-## 🧪 Running Tests
+## Running Tests
 
 ```bash
 # Run all tests
@@ -341,18 +337,18 @@ pytest tests/test_mlp.py -v
 GT_WORKER_BATCH_SIZE=10 pytest tests/ -v
 ```
 
-All tests auto-start a local GT system and verify numeric correctness.
+Tests auto-start a local GT system and verify numeric correctness.
 
-## 📊 Benchmarks
+## Benchmarks
 
 ```bash
 cd benchmarks
 python compare.py
 ```
 
-**Note:** GT adds communication/serialization overhead. For small operations this can be significant. For large operations (training, big matmuls), overhead becomes negligible and batching/compilation provide massive speedups.
+Note: GT adds communication/serialization overhead. For small operations this overhead is significant. For large operations (training, large matmuls), batching and compilation can reduce this overhead.
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -381,12 +377,10 @@ python compare.py
                        │
 ┌──────────────────────▼──────────────────────────────────────────┐
 │                    gt/dispatcher/                                │
-│  ┌────────────────────────────────────────────────────┐        │
-│  │  • Reads signal configs from YAML                  │        │
-│  │  • Routes operations based on sharding strategy    │        │
-│  │  • Logs instruction stream to file                 │        │
-│  │  • Handles multiple clients concurrently           │        │
-│  └────────────────────────────────────────────────────┘        │
+│  • Reads signal configs from YAML                               │
+│  • Routes operations based on sharding strategy                 │
+│  • Logs instruction stream to file                              │
+│  • Handles multiple clients concurrently                        │
 └───────┬──────────────┬──────────────┬──────────────────────────┘
         │              │              │ TCP (WorkerProtocol)
         │              │              │
@@ -402,104 +396,52 @@ python compare.py
       Host 0        Host 0        Host N
 ```
 
-**Key Components:**
+**Components:**
 
-- **`gt/client/`** - User-facing API
-  - Location-transparent tensors
-  - Tape-based autograd
-  - Signal tracking and scope management
-  - Neural network modules
+- **gt/client/** - User-facing API with location-transparent tensors, tape-based autograd, signal tracking, and neural network modules
+- **gt/dispatcher/** - Coordinates clients and schedules operations. Maps client tensors to physical locations, reads signal configs for sharding decisions, and logs instruction streams
+- **gt/worker/** - Executes operations using backends. Supports instruction batching, torch.compile() with caching, and multiple backends (PyTorch/NumPy). One worker per GPU.
+- **gt/signal.py** - Signal-based sharding API with context managers, thread-local signal stack, and backward signal support
+- **gt/config.py** - YAML config loading that parses sharding strategies and maps signal names to worker assignments
 
-- **`gt/dispatcher/`** - Coordinates clients and schedules operations
-  - Maps `client:tensor` to physical locations
-  - Reads signal configs for sharding decisions
-  - Instruction stream logging
-  - Handles multiple concurrent clients
-
-- **`gt/worker/`** - Executes operations with backends
-  - **Instruction batching**: Accumulates ops before execution
-  - **torch.compile()**: Compiles and caches computation graphs
-  - **Multiple backends**: PyTorch (with GPU) or NumPy (reference)
-  - One worker per GPU
-
-- **`gt/signal.py`** - Signal-based sharding API
-  - Context managers for scope tracking
-  - Thread-local signal stack
-  - Backward signal support for pipeline parallelism
-
-- **`gt/config.py`** - YAML config loading
-  - Parses sharding strategies
-  - Maps signal names to worker assignments
-
-## 📖 Documentation
+## Documentation
 
 - [Signal-Based Sharding Guide](examples/README_SIGNALS.md) - Complete guide to sharding API
 - [Batching & Compilation](docs/BATCHING_AND_COMPILATION.md) - How instruction batching works
 - [CLAUDE.md](CLAUDE.md) - Detailed architecture documentation
 
-## 🎯 Design Philosophy
+## Design Philosophy
 
-This code is designed to be **SIMPLE and READABLE** for ML researchers. We prioritize:
+The code prioritizes:
 
-1. **Clarity over performance** in the initial implementation
-2. **PyTorch-compatible API** for easy adoption
-3. **Declarative configuration** via YAML instead of complex APIs
-4. **Automatic optimization** via torch.compile (no manual graph building)
+1. Clarity over performance in initial implementation
+2. PyTorch-compatible API
+3. Declarative configuration via YAML
+4. Automatic optimization via torch.compile
 
-## 🚀 Examples
+## Examples
 
 See [examples/](examples/) directory:
 
 - `signal_demo.py` - Signal-based sharding demonstration
 - `compile_demo.py` - Compilation directives demonstration
+- `debug_demo.py` - Debug utilities demonstration
 - `config_sharding.yaml` - Example sharding configuration
 - `config_compile.yaml` - Example compilation configuration
 - `demo.py` - Basic tensor operations
 - `simple_launch.py` - Manual server/worker launch
 
-## 📊 Performance Tips
+## Performance Considerations
 
-1. **Enable batching** for training workloads:
-   ```bash
-   GT_WORKER_BATCH_SIZE=10 python train.py
-   ```
+1. **Batching**: Enable with `GT_WORKER_BATCH_SIZE` for repeated operation patterns
+2. **Signals**: Use to control sharding strategies via configuration
+3. **Warmup**: First execution includes compilation overhead
+4. **Logging**: Use instruction logging to identify bottlenecks
 
-2. **Use signals** to control sharding strategies:
-   ```python
-   with gt.signal.context('data_parallel'):
-       # Batch-sharded across all workers
-       x = gt.randn(1000, 1000)
-   ```
+## Contributing
 
-3. **Warmup compilation** before timing:
-   ```python
-   # Run once to compile
-   for i in range(3):
-       loss = model(X)
-       loss.backward()
+Contributions welcome. This is a research prototype focused on simplicity and readability.
 
-   # Now time actual training
-   start = time.time()
-   for epoch in range(100):
-       loss = model(X)
-       loss.backward()
-   print(f"Time: {time.time() - start:.2f}s")
-   ```
-
-4. **Use instruction logging** to find bottlenecks:
-   ```bash
-   GT_INSTRUCTION_LOG=profile.log python train.py
-   # Check profile.log for large timestamp gaps
-   ```
-
-## 🤝 Contributing
-
-Contributions welcome! This is a research prototype focused on simplicity and readability.
-
-## 📝 License
+## License
 
 MIT
-
----
-
-**Built with ❤️ for ML researchers who want distributed training without the complexity.**
