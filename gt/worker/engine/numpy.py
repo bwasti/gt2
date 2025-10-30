@@ -51,6 +51,9 @@ class NumpyEngine(Engine):
     def tanh(self, tensor: np.ndarray) -> np.ndarray:
         return np.tanh(tensor)
 
+    def sqrt(self, tensor: np.ndarray) -> np.ndarray:
+        return np.sqrt(tensor)
+
     def transpose(self, tensor: np.ndarray) -> np.ndarray:
         return np.transpose(tensor)
 

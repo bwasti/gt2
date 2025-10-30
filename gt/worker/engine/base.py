@@ -84,6 +84,11 @@ class Engine(ABC):
         pass
 
     @abstractmethod
+    def sqrt(self, tensor: Any) -> Any:
+        """Square root."""
+        pass
+
+    @abstractmethod
     def transpose(self, tensor: Any) -> Any:
         """Transpose (swap last two dimensions)."""
         pass

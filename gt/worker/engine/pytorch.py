@@ -75,6 +75,9 @@ class PyTorchEngine(Engine):
     def tanh(self, tensor):
         return self.torch.tanh(tensor)
 
+    def sqrt(self, tensor):
+        return self.torch.sqrt(tensor)
+
     def transpose(self, tensor):
         return self.torch.transpose(tensor, -2, -1)
 

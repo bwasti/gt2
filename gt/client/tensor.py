@@ -182,6 +182,10 @@ class Tensor:
         """Tanh activation: (exp(x) - exp(-x)) / (exp(x) + exp(-x))"""
         return _unary_op("tanh", self)
 
+    def sqrt(self):
+        """Square root: sqrt(x)"""
+        return _unary_op("sqrt", self)
+
     def reshape(self, *shape):
         """Reshape tensor to new shape"""
         # TODO: implement reshape
@@ -275,9 +279,20 @@ def _binary_op(op: str, left, right) -> Tensor:
         result.shape = np.broadcast_shapes(left.shape, right.shape)
         result.dtype = left.dtype
     elif op == "matmul":
-        # Result shape: (left.shape[0], right.shape[1])
+        # Result shape depends on input dimensions
+        # For 2D @ 2D: (m, n) @ (n, p) -> (m, p)
+        # For 3D @ 2D: (batch, seq, n) @ (n, p) -> (batch, seq, p)
+        # For 3D @ 3D: (batch, m, n) @ (batch, n, p) -> (batch, m, p)
         if left.shape and right.shape:
-            result.shape = (left.shape[0], right.shape[-1])
+            if len(left.shape) == 3 and len(right.shape) == 2:
+                # 3D @ 2D batched matmul
+                result.shape = (left.shape[0], left.shape[1], right.shape[-1])
+            elif len(left.shape) >= 2 and len(right.shape) >= 2:
+                # Standard matmul: result has left's batch dims and right's last dim
+                result.shape = left.shape[:-1] + (right.shape[-1],)
+            else:
+                # Fallback
+                result.shape = (left.shape[0], right.shape[-1])
             result.dtype = left.dtype
 
     # Record on autograd tape if needed
@@ -398,7 +413,7 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
         raise RuntimeError(f"Operation {op} failed: {response.error}")
 
     # Infer result shape/dtype (TODO: get from dispatcher)
-    if op in ["exp", "log", "relu", "sigmoid", "tanh"]:
+    if op in ["exp", "log", "relu", "sigmoid", "tanh", "sqrt"]:
         # These ops preserve shape
         result.shape = input_tensor.shape
         result.dtype = input_tensor.dtype
@@ -463,6 +478,10 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
                 # grad of tanh(x): (1 - tanh²(x)) * grad_output
                 one = from_numpy(np.array(1.0, dtype='float32'))
                 return [grad_output * (one - result * result)]
+            elif op == "sqrt":
+                # grad of sqrt(x): grad_output / (2 * sqrt(x)) = grad_output / (2 * result)
+                two = from_numpy(np.array(2.0, dtype='float32'))
+                return [grad_output / (two * result)]
             elif op == "transpose":
                 # grad of transpose: just transpose the gradient back
                 return [grad_output.T]

@@ -279,6 +279,8 @@ class Worker:
             result = self.engine.sigmoid(input_tensor)
         elif cmd.op == "tanh":
             result = self.engine.tanh(input_tensor)
+        elif cmd.op == "sqrt":
+            result = self.engine.sqrt(input_tensor)
         elif cmd.op == "transpose":
             result = self.engine.transpose(input_tensor)
         else:
