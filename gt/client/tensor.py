@@ -6,12 +6,16 @@ Keep this SIMPLE and READABLE.
 
 import numpy as np
 import weakref
+import threading
 from typing import Optional
+from collections import deque
 
 
 # Global client connection (set when client connects)
 _client_connection = None
 _next_tensor_id = 0
+_connection_lock = threading.Lock()  # Ensure serial command/response flow
+_free_queue = deque()  # Queue of tensor IDs to free (appended from GC, processed in lock)
 
 
 class TensorData:
@@ -72,12 +76,19 @@ class Tensor:
         if _client_connection is None:
             raise RuntimeError("Not connected to dispatcher")
 
-        cmd = GetData(tensor_id=self.id)
-        _client_connection.send(cmd)
-        response: ClientResponse = _client_connection.recv()
+        with _connection_lock:
+            # Process any pending frees first
+            _process_free_queue()
+
+            cmd = GetData(tensor_id=self.id)
+            _client_connection.send(cmd)
+            response: ClientResponse = _client_connection.recv()
 
         if not response.success:
             raise RuntimeError(f"Failed to get data: {response.error}")
+
+        if response.data is None:
+            raise RuntimeError(f"Tensor {self.id}: Got success=True but data=None from dispatcher")
 
         return TensorData(response.data)
 
@@ -226,6 +237,7 @@ def _binary_op(op: str, left, right) -> Tensor:
     """Execute a binary operation."""
     from gt.transport.protocol import BinaryOp, ClientResponse
     from gt.client.autograd import get_graph
+    import numpy as np
 
     if _client_connection is None:
         raise RuntimeError("Not connected to dispatcher")
@@ -241,11 +253,27 @@ def _binary_op(op: str, left, right) -> Tensor:
 
     result = Tensor(requires_grad=requires_grad)
     cmd = BinaryOp(result_id=result.id, op=op, left_id=left.id, right_id=right.id)
-    _client_connection.send(cmd)
-    response: ClientResponse = _client_connection.recv()
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
 
     if not response.success:
         raise RuntimeError(f"Operation {op} failed: {response.error}")
+
+    # Infer result shape/dtype (TODO: get from dispatcher)
+    if op in ["add", "sub", "mul", "div", "gt"]:
+        # Use NumPy broadcasting rules to compute result shape
+        import numpy as np
+        result.shape = np.broadcast_shapes(left.shape, right.shape)
+        result.dtype = left.dtype
+    elif op == "matmul":
+        # Result shape: (left.shape[0], right.shape[1])
+        if left.shape and right.shape:
+            result.shape = (left.shape[0], right.shape[-1])
+            result.dtype = left.dtype
 
     # Record on autograd tape if needed
     if requires_grad:
@@ -253,8 +281,61 @@ def _binary_op(op: str, left, right) -> Tensor:
 
         # Define gradient function for this operation
         def grad_fn(grad_output):
+            import numpy as np
+
             if op == "add":
-                return [grad_output, grad_output]
+                # For broadcasting, we need to sum grad_output to match input shapes
+                grad_left = grad_output
+                grad_right = grad_output
+
+                # If left was broadcasted (smaller shape), sum grad across those dims
+                if left.shape != grad_output.shape:
+                    # Sum across dimensions that were broadcasted
+                    axes_to_sum = []
+                    grad_shape = list(grad_output.shape)
+                    left_shape = list(left.shape) if left.shape else []
+
+                    # Pad left_shape with 1s on the left
+                    while len(left_shape) < len(grad_shape):
+                        left_shape.insert(0, 1)
+                        axes_to_sum.append(0)
+
+                    # Find dimensions where left was size 1 but grad is larger
+                    for i in range(len(grad_shape)):
+                        if left_shape[i] == 1 and grad_shape[i] > 1:
+                            axes_to_sum.append(i)
+
+                    if axes_to_sum:
+                        # Sum and reshape
+                        grad_data = grad_output.data.numpy()
+                        for axis in sorted(axes_to_sum, reverse=True):
+                            grad_data = grad_data.sum(axis=axis, keepdims=True)
+                        # Remove dimensions that were added
+                        grad_data = grad_data.reshape(left.shape)
+                        grad_left = from_numpy(grad_data)
+
+                # Same for right
+                if right.shape != grad_output.shape:
+                    axes_to_sum = []
+                    grad_shape = list(grad_output.shape)
+                    right_shape = list(right.shape) if right.shape else []
+
+                    while len(right_shape) < len(grad_shape):
+                        right_shape.insert(0, 1)
+                        axes_to_sum.append(0)
+
+                    for i in range(len(grad_shape)):
+                        if right_shape[i] == 1 and grad_shape[i] > 1:
+                            axes_to_sum.append(i)
+
+                    if axes_to_sum:
+                        grad_data = grad_output.data.numpy()
+                        for axis in sorted(axes_to_sum, reverse=True):
+                            grad_data = grad_data.sum(axis=axis, keepdims=True)
+                        grad_data = grad_data.reshape(right.shape)
+                        grad_right = from_numpy(grad_data)
+
+                return [grad_left, grad_right]
             elif op == "sub":
                 # d/dleft (left - right) = grad_output
                 # d/dright (left - right) = -grad_output
@@ -296,11 +377,35 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
 
     result = Tensor(requires_grad=requires_grad)
     cmd = UnaryOp(result_id=result.id, op=op, input_id=input_tensor.id)
-    _client_connection.send(cmd)
-    response: ClientResponse = _client_connection.recv()
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
 
     if not response.success:
         raise RuntimeError(f"Operation {op} failed: {response.error}")
+
+    # Infer result shape/dtype (TODO: get from dispatcher)
+    if op in ["exp", "log", "relu", "sigmoid", "tanh"]:
+        # These ops preserve shape
+        result.shape = input_tensor.shape
+        result.dtype = input_tensor.dtype
+    elif op == "transpose":
+        # Transpose swaps last two dimensions
+        if input_tensor.shape and len(input_tensor.shape) >= 2:
+            new_shape = list(input_tensor.shape)
+            new_shape[-2], new_shape[-1] = new_shape[-1], new_shape[-2]
+            result.shape = tuple(new_shape)
+            result.dtype = input_tensor.dtype
+        else:
+            result.shape = input_tensor.shape
+            result.dtype = input_tensor.dtype
+    elif op in ["sum", "mean"]:
+        # Reductions produce scalars
+        result.shape = ()
+        result.dtype = input_tensor.dtype
 
     # Record on autograd tape if needed
     if requires_grad:
@@ -308,6 +413,8 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
 
         # Define gradient function for this operation
         def grad_fn(grad_output):
+            import numpy as np
+
             if op == "sum":
                 # grad of sum: broadcast scalar gradient to input shape
                 # Create a tensor filled with the gradient value
@@ -318,9 +425,14 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
                 else:
                     return [grad_output]
             elif op == "mean":
-                # grad of mean is grad_output / n
-                # For now, simplified
-                return [grad_output]
+                # grad of mean: broadcast grad_output to input shape and divide by n
+                grad_val = grad_output.data.numpy()
+                if input_tensor.shape:
+                    n = np.prod(input_tensor.shape)
+                    broadcasted = np.full(input_tensor.shape, grad_val / n, dtype='float32')
+                    return [from_numpy(broadcasted)]
+                else:
+                    return [grad_output]
             elif op == "exp":
                 # grad of exp(x) is exp(x) * grad_output = result * grad_output
                 return [grad_output * result]
@@ -353,18 +465,28 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
 
 
 def _free_tensor(tensor_id: int):
-    """Callback for garbage collection."""
-    from gt.transport.protocol import FreeTensor
-
+    """Callback for garbage collection - queue for later processing."""
     if _client_connection is None or tensor_id is None:
         return
 
-    try:
-        cmd = FreeTensor(tensor_id=tensor_id)
-        _client_connection.send(cmd)
-        # Don't wait for response during cleanup
-    except:
-        pass  # Connection might be closed
+    # Just append to queue - no lock needed here since append is atomic
+    # Queue will be processed by _process_free_queue() while holding connection lock
+    _free_queue.append(tensor_id)
+
+
+def _process_free_queue():
+    """Process queued tensor frees. Must be called while holding _connection_lock."""
+    from gt.transport.protocol import FreeTensor
+
+    # Process all pending frees
+    while _free_queue:
+        tensor_id = _free_queue.popleft()
+        try:
+            cmd = FreeTensor(tensor_id=tensor_id)
+            _client_connection.send(cmd)
+            _client_connection.recv()  # Wait for response to maintain sync
+        except:
+            pass  # Connection might be closed
 
 
 # Factory functions for creating tensors
@@ -383,8 +505,12 @@ def from_numpy(array: np.ndarray, requires_grad: bool = False) -> Tensor:
         dtype=str(array.dtype),
         shape=array.shape
     )
-    _client_connection.send(cmd)
-    response: ClientResponse = _client_connection.recv()
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
 
     if not response.success:
         raise RuntimeError(f"Failed to create tensor: {response.error}")
@@ -407,8 +533,12 @@ def randn(*shape, dtype="float32") -> Tensor:
         shape=shape,
         dtype=dtype
     )
-    _client_connection.send(cmd)
-    response: ClientResponse = _client_connection.recv()
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
 
     if not response.success:
         raise RuntimeError(f"Failed to create randn tensor: {response.error}")
@@ -431,8 +561,12 @@ def zeros(*shape, dtype="float32") -> Tensor:
         shape=shape,
         dtype=dtype
     )
-    _client_connection.send(cmd)
-    response: ClientResponse = _client_connection.recv()
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
 
     if not response.success:
         raise RuntimeError(f"Failed to create zeros tensor: {response.error}")

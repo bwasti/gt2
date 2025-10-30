@@ -1,19 +1,29 @@
 # MLP Training Issues
 
 ## Status
-MLP training loop is not converging. Loss stuck at exactly 0.249970 (suspiciously close to 0.25, which is random guessing for binary classification).
+✅ **FIXED!** In-place operations now working correctly. Root cause was async garbage collection causing response mismatches.
+✅ **ADDED!** Operation tape logging - every command with timestamps for debugging.
+✅ **FIXED!** Autograd tape memory leak - tape must be cleared after each backward() call.
+✅ **WORKING!** MLP training converges! Loss: 0.25 → 0.027, Accuracy: 100%
+
+**Result:** Full MLP training now works end-to-end!
 
 ## What Works
 - ✅ In-place subtraction (`-=`) with functional ID swapping
-- ✅ Gradient computation (gradients exist and have reasonable norms ~0.2-0.3)
-- ✅ Simple Linear model training (weights change, but loss explodes - might be lr issue)
+- ✅ Gradient computation with correct broadcasting
+- ✅ Full MLP training with convergence
 - ✅ Forward pass through MLP (produces predictions)
 - ✅ Transpose operation and gradients
 - ✅ Scalar-tensor operations (0.1 * tensor)
+- ✅ Autograd tape management (clears after backward())
+- ✅ Queued garbage collection (no deadlocks)
 
-## What Doesn't Work
-- ❌ MLP loss not decreasing across epochs (stuck at 0.249970)
-- ❌ Predictions might be constant (0.5) - need to verify
+## Key Fixes Applied
+1. **Autograd tape clearing**: Added `self.tape.clear()` after backward() to prevent memory leak
+2. **Queued GC**: FreeTensor operations queued and processed with connection lock
+3. **Broadcasting gradients**: Fixed mean and add gradients to handle broadcasting correctly
+4. **Shape inference**: Fixed transpose to swap dimensions correctly
+5. **Parameter collection**: Made Module.parameters() recursive for nested modules
 
 ## Debugging Observations
 1. Simple linear model: weights change but loss INCREASES (0.39 → 1.52 over 3 epochs)
@@ -77,6 +87,30 @@ This keeps everything functional on the worker side while appearing imperative o
 
 ### Finalizer Management
 Must call `tensor._finalizer.detach()` before stealing a tensor's ID to prevent the finalizer from freeing the tensor we just adopted.
+
+## Debugging Infrastructure
+
+### Operation Tape
+The dispatcher now logs every operation with timestamps for debugging:
+
+```
+[TAPE 0.003s] RECV         | 127.0.0.1:59712      | BinaryOp        | result=2 op=matmul left=0 right=1
+[TAPE 0.003s] WORKER_SEND  | auto_worker          | WorkerBinaryOp  | op=matmul result=127.0.0.1:59712_2
+[TAPE 0.003s] WORKER_RECV  | auto_worker          | WorkerBinaryOp  | success=True
+[TAPE 0.004s] SEND         | 127.0.0.1:59712      | BinaryOp        | success=True
+```
+
+Each entry shows:
+- Timestamp (seconds since dispatcher start)
+- Event type (RECV/SEND from client, WORKER_SEND/WORKER_RECV)
+- Client/worker ID
+- Command type
+- Operation details
+
+This makes it easy to:
+- Debug hangs (see the last operation before timeout)
+- Identify slow operations (large timestamp gaps)
+- Understand the full command flow through the system
 
 ## Known Issues to Fix Later
 

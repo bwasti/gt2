@@ -7,6 +7,7 @@ Keep this SIMPLE and READABLE.
 """
 
 import threading
+import time
 from gt.transport.connection import create_server, Connection
 from gt.transport.protocol import (
     ClientCommand, CreateTensor, BinaryOp, UnaryOp, GetData, FreeTensor, CopyTensor,
@@ -14,6 +15,35 @@ from gt.transport.protocol import (
     WorkerGetData, WorkerFreeTensor, WorkerResponse
 )
 from gt.dispatcher.tensor_handle import TensorHandle
+
+
+class OperationTape:
+    """Records all operations with timestamps for debugging."""
+
+    def __init__(self):
+        self.entries = []
+        self.lock = threading.Lock()
+        self.start_time = time.time()
+
+    def log(self, event_type: str, client_id: str, command_type: str, details: str = ""):
+        """Log an operation event."""
+        with self.lock:
+            elapsed = time.time() - self.start_time
+            entry = {
+                "timestamp": elapsed,
+                "event": event_type,
+                "client": client_id,
+                "command": command_type,
+                "details": details
+            }
+            self.entries.append(entry)
+            # Print for real-time debugging
+            print(f"[TAPE {elapsed:.3f}s] {event_type:12s} | {client_id:20s} | {command_type:15s} | {details}")
+
+    def dump(self):
+        """Dump all recorded entries."""
+        with self.lock:
+            return list(self.entries)
 
 
 class Dispatcher:
@@ -31,6 +61,7 @@ class Dispatcher:
         self.next_worker_idx = 0  # Simple round-robin scheduling
         self.running = False
         self.server_socket = None
+        self.tape = OperationTape()  # Record all operations for debugging
 
     def register_worker(self, worker_conn: Connection, worker_id: str):
         """Register a worker."""
@@ -74,16 +105,24 @@ class Dispatcher:
     def _handle_client(self, conn: Connection, client_id: str):
         """Handle a client connection."""
         print(f"Handling client {client_id}")
+        self.tape.log("CONNECT", client_id, "CLIENT", "")
 
         try:
             while self.running:
                 cmd = conn.recv()
+                cmd_type = type(cmd).__name__
+                self.tape.log("RECV", client_id, cmd_type, self._get_cmd_details(cmd))
+
                 response = self._process_command(cmd, client_id)
+
+                self.tape.log("SEND", client_id, cmd_type, f"success={response.success}")
                 conn.send(response)
         except Exception as e:
+            self.tape.log("ERROR", client_id, "EXCEPTION", str(e))
             print(f"Client {client_id} error: {e}")
         finally:
             conn.close()
+            self.tape.log("DISCONNECT", client_id, "CLIENT", "")
             print(f"Client {client_id} disconnected")
 
     def _process_command(self, cmd: ClientCommand, client_id: str) -> ClientResponse:
@@ -123,8 +162,10 @@ class Dispatcher:
             dtype=cmd.dtype,
             shape=cmd.shape
         )
+        self._log_worker_cmd(worker["id"], "WorkerCreateTensor", f"tensor={worker_tensor_id}")
         worker["conn"].send(worker_cmd)
         worker_response: WorkerResponse = worker["conn"].recv()
+        self._log_worker_response(worker["id"], "WorkerCreateTensor", worker_response.success)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -180,8 +221,10 @@ class Dispatcher:
             left_id=left_loc.worker_tensor_id,
             right_id=right_loc.worker_tensor_id
         )
+        self._log_worker_cmd(worker["id"], "WorkerBinaryOp", f"op={cmd.op} result={result_tensor_id}")
         worker["conn"].send(worker_cmd)
         worker_response: WorkerResponse = worker["conn"].recv()
+        self._log_worker_response(worker["id"], "WorkerBinaryOp", worker_response.success)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -223,8 +266,10 @@ class Dispatcher:
                 shape=cmd.shape,
                 dtype=cmd.dtype
             )
+            self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} shape={cmd.shape}")
             worker["conn"].send(worker_cmd)
             worker_response: WorkerResponse = worker["conn"].recv()
+            self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=worker_response.error)
@@ -266,8 +311,10 @@ class Dispatcher:
             op=cmd.op,
             input_id=input_loc.worker_tensor_id
         )
+        self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} input={input_loc.worker_tensor_id}")
         worker["conn"].send(worker_cmd)
         worker_response: WorkerResponse = worker["conn"].recv()
+        self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -320,8 +367,10 @@ class Dispatcher:
             return ClientResponse(success=False, error="Worker not found")
 
         worker_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+        self._log_worker_cmd(worker["id"], "WorkerGetData", f"tensor={loc.worker_tensor_id}")
         worker["conn"].send(worker_cmd)
         worker_response: WorkerResponse = worker["conn"].recv()
+        self._log_worker_response(worker["id"], "WorkerGetData", worker_response.success)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -338,8 +387,10 @@ class Dispatcher:
         if worker:
             worker_cmd = WorkerFreeTensor(tensor_id=loc.worker_tensor_id)
             try:
+                self._log_worker_cmd(worker["id"], "WorkerFreeTensor", f"tensor={loc.worker_tensor_id}")
                 worker["conn"].send(worker_cmd)
-                worker["conn"].recv()  # Ignore response
+                response = worker["conn"].recv()
+                self._log_worker_response(worker["id"], "WorkerFreeTensor", response.success if response else False)
             except:
                 pass  # Worker might be dead
 
@@ -639,3 +690,29 @@ class Dispatcher:
             if worker["id"] == worker_id:
                 return worker
         return None
+
+    def _get_cmd_details(self, cmd) -> str:
+        """Extract useful details from command for logging."""
+        if isinstance(cmd, CreateTensor):
+            return f"tensor_id={cmd.tensor_id} shape={cmd.shape}"
+        elif isinstance(cmd, BinaryOp):
+            return f"result={cmd.result_id} op={cmd.op} left={cmd.left_id} right={cmd.right_id}"
+        elif isinstance(cmd, UnaryOp):
+            if cmd.input_id is None:
+                return f"result={cmd.result_id} op={cmd.op} shape={cmd.shape}"
+            return f"result={cmd.result_id} op={cmd.op} input={cmd.input_id}"
+        elif isinstance(cmd, GetData):
+            return f"tensor_id={cmd.tensor_id}"
+        elif isinstance(cmd, FreeTensor):
+            return f"tensor_id={cmd.tensor_id}"
+        elif isinstance(cmd, CopyTensor):
+            return f"dest={cmd.dest_id} src={cmd.src_id}"
+        return ""
+
+    def _log_worker_cmd(self, worker_id: str, cmd_type: str, details: str = ""):
+        """Log a command being sent to a worker."""
+        self.tape.log("WORKER_SEND", worker_id, cmd_type, details)
+
+    def _log_worker_response(self, worker_id: str, cmd_type: str, success: bool):
+        """Log a response received from a worker."""
+        self.tape.log("WORKER_RECV", worker_id, cmd_type, f"success={success}")

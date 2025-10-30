@@ -71,6 +71,10 @@ class AutogradGraph:
                 # Set gradient on tensor
                 inp._grad = grads[inp.id]
 
+        # IMPORTANT: Clear the tape after backward pass
+        # PyTorch does this - the computational graph is freed after .backward()
+        self.tape.clear()
+
     def no_grad(self):
         """Context manager to disable gradient recording."""
         return _NoGrad(self)

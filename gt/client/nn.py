@@ -18,6 +18,17 @@ class Module:
 
     def __init__(self):
         self._parameters = []
+        self._modules = {}  # Track child modules
+
+    def __setattr__(self, name, value):
+        """Override to track child modules."""
+        if isinstance(value, Module):
+            # Store child modules
+            if not hasattr(self, '_modules'):
+                # During __init__, _modules doesn't exist yet
+                super().__setattr__('_modules', {})
+            self._modules[name] = value
+        super().__setattr__(name, value)
 
     def forward(self, *args, **kwargs):
         """
@@ -33,9 +44,14 @@ class Module:
 
     def parameters(self) -> List[Tensor]:
         """
-        Return list of trainable parameters.
+        Return list of trainable parameters (recursively from all submodules).
         """
-        return self._parameters
+        params = list(self._parameters)
+        # Recursively collect from child modules
+        if hasattr(self, '_modules'):
+            for module in self._modules.values():
+                params.extend(module.parameters())
+        return params
 
     def zero_grad(self):
         """

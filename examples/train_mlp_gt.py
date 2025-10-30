@@ -35,7 +35,7 @@ class MLP(nn.Module):
         return x
 
 
-def train(model, X, y, epochs=100, lr=0.1):
+def train(model, X, y, epochs=100, lr=5.0):
     """Train the model."""
     X_tensor = torch.from_numpy(X)
     y_tensor = torch.from_numpy(y)
