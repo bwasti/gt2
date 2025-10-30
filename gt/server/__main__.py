@@ -55,16 +55,27 @@ def main():
                         help='Host to bind to (default: 0.0.0.0)')
     parser.add_argument('--spawn_gpu_workers', type=int, default=0,
                         help='Number of GPU workers to spawn automatically (default: 0 - manual worker setup)')
+    parser.add_argument('--log-file', type=str, default=None,
+                        help='Write operation log to file (default: None)')
+    parser.add_argument('--no-console-log', action='store_true',
+                        help='Disable console logging (default: enabled)')
     args = parser.parse_args()
 
     print(f"Starting GT server on {args.host}:{args.port}")
+    if args.log_file:
+        print(f"Writing operation log to: {args.log_file}")
 
     # Spawn workers if requested
     if args.spawn_gpu_workers > 0:
         print(f"Spawning {args.spawn_gpu_workers} GPU worker(s)...")
         _spawn_workers(args.spawn_gpu_workers, args.host, args.port)
 
-    dispatcher = Dispatcher(host=args.host, port=args.port)
+    dispatcher = Dispatcher(
+        host=args.host,
+        port=args.port,
+        log_file=args.log_file,
+        console_log=not args.no_console_log
+    )
     dispatcher.running = True
 
     server_sock = create_server(args.host, args.port)

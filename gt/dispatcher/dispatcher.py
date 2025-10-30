@@ -17,19 +17,64 @@ from gt.transport.protocol import (
 from gt.dispatcher.tensor_handle import TensorHandle
 
 
-class OperationTape:
-    """Records all operations with timestamps for debugging."""
+class InstructionStream:
+    """Records all client-dispatcher-worker instructions with timestamps for debugging and monitoring."""
 
-    def __init__(self):
+    def __init__(self, log_file: str = None, console: bool = True):
         self.entries = []
         self.lock = threading.Lock()
         self.start_time = time.time()
+        self.sequence = 0
+        self.console = console
+        self.log_file = log_file
+        self.file_handle = None
+
+        # Open log file if specified
+        if self.log_file:
+            try:
+                self.file_handle = open(self.log_file, 'w', buffering=1)  # Line buffered
+                self._write_header()
+            except Exception as e:
+                print(f"Warning: Could not open instruction log file {self.log_file}: {e}")
+                self.file_handle = None
+
+    def _write_header(self):
+        """Write header to log file."""
+        if self.file_handle:
+            import datetime
+            header = f"""
+{'='*100}
+GT2 Dispatcher Instruction Stream
+Started: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+{'='*100}
+
+This log records all instructions flowing through the dispatcher:
+  - Client commands (RECV/SEND)
+  - Worker operations (WORKER_SEND/WORKER_RECV)
+  - Connection events (CONNECT/DISCONNECT)
+
+Format: <elapsed> | #<seq> | <event_type> | <source> | <command> | <details>
+
+Column Details:
+  elapsed  = Seconds since dispatcher start (with millisecond precision)
+  seq      = Sequence number (increments for each instruction)
+  event    = Event type (CONNECT, RECV, SEND, WORKER_SEND, WORKER_RECV, DISCONNECT, ERROR)
+  source   = Source identifier (CLIENT/WORKER with ID)
+  command  = Command type (e.g., CreateTensor, BinaryOp, UnaryOp)
+  details  = Additional context (tensor IDs, operation names, etc.)
+
+""".lstrip()
+            self.file_handle.write(header)
+            self.file_handle.flush()
 
     def log(self, event_type: str, client_id: str, command_type: str, details: str = ""):
         """Log an operation event."""
         with self.lock:
             elapsed = time.time() - self.start_time
+            self.sequence += 1
+
             entry = {
+                "seq": self.sequence,
                 "timestamp": elapsed,
                 "event": event_type,
                 "client": client_id,
@@ -37,13 +82,62 @@ class OperationTape:
                 "details": details
             }
             self.entries.append(entry)
-            # Print for real-time debugging
-            print(f"[TAPE {elapsed:.3f}s] {event_type:12s} | {client_id:20s} | {command_type:15s} | {details}")
+
+            # Format the log line
+            log_line = self._format_log_entry(entry)
+
+            # Print to console if enabled
+            if self.console:
+                print(log_line)
+
+            # Write to file if enabled
+            if self.file_handle:
+                self.file_handle.write(log_line + "\n")
+                self.file_handle.flush()
+
+    def _format_log_entry(self, entry: dict) -> str:
+        """Format a log entry for output."""
+        elapsed = entry["timestamp"]
+        seq = entry["seq"]
+        event = entry["event"]
+        client = entry["client"]
+        command = entry["command"]
+        details = entry["details"]
+
+        # Determine source type
+        if "WORKER" in event:
+            source_type = "WORKER"
+        elif event in ["CONNECT", "DISCONNECT"]:
+            source_type = "CLIENT"
+        else:
+            source_type = "CLIENT"
+
+        # Format with nice alignment
+        # Format: "  0.123s | #0042 | RECV         | CLIENT 127.0.0.1:12345 | BinaryOp        | result=42 op=add"
+        time_str = f"{elapsed:7.3f}s"
+        seq_str = f"#{seq:04d}"
+        event_str = f"{event:12s}"
+        source_str = f"{source_type} {client:20s}"
+        command_str = f"{command:15s}"
+
+        # Build the line
+        if details:
+            line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str} | {details}"
+        else:
+            line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str}"
+
+        return line
 
     def dump(self):
         """Dump all recorded entries."""
         with self.lock:
             return list(self.entries)
+
+    def close(self):
+        """Close the log file."""
+        if self.file_handle:
+            self.file_handle.close()
+            self.file_handle = None
 
 
 class Dispatcher:
@@ -53,7 +147,7 @@ class Dispatcher:
     Takes commands from clients and schedules them to workers.
     """
 
-    def __init__(self, host="localhost", port=9000):
+    def __init__(self, host="localhost", port=9000, log_file: str = None, console_log: bool = True):
         self.host = host
         self.port = port
         self.tensor_handles = TensorHandle()
@@ -61,7 +155,7 @@ class Dispatcher:
         self.next_worker_idx = 0  # Simple round-robin scheduling
         self.running = False
         self.server_socket = None
-        self.tape = OperationTape()  # Record all operations for debugging
+        self.instruction_stream = InstructionStream(log_file=log_file, console=console_log)  # Record all instructions for debugging/monitoring
 
     def register_worker(self, worker_conn: Connection, worker_id: str):
         """Register a worker."""
@@ -101,28 +195,30 @@ class Dispatcher:
         self.running = False
         if self.server_socket:
             self.server_socket.close()
+        # Close the instruction stream log file
+        self.instruction_stream.close()
 
     def _handle_client(self, conn: Connection, client_id: str):
         """Handle a client connection."""
         print(f"Handling client {client_id}")
-        self.tape.log("CONNECT", client_id, "CLIENT", "")
+        self.instruction_stream.log("CONNECT", client_id, "CLIENT", "")
 
         try:
             while self.running:
                 cmd = conn.recv()
                 cmd_type = type(cmd).__name__
-                self.tape.log("RECV", client_id, cmd_type, self._get_cmd_details(cmd))
+                self.instruction_stream.log("RECV", client_id, cmd_type, self._get_cmd_details(cmd))
 
                 response = self._process_command(cmd, client_id)
 
-                self.tape.log("SEND", client_id, cmd_type, f"success={response.success}")
+                self.instruction_stream.log("SEND", client_id, cmd_type, f"success={response.success}")
                 conn.send(response)
         except Exception as e:
-            self.tape.log("ERROR", client_id, "EXCEPTION", str(e))
+            self.instruction_stream.log("ERROR", client_id, "EXCEPTION", str(e))
             print(f"Client {client_id} error: {e}")
         finally:
             conn.close()
-            self.tape.log("DISCONNECT", client_id, "CLIENT", "")
+            self.instruction_stream.log("DISCONNECT", client_id, "CLIENT", "")
             print(f"Client {client_id} disconnected")
 
     def _process_command(self, cmd: ClientCommand, client_id: str) -> ClientResponse:
@@ -711,8 +807,8 @@ class Dispatcher:
 
     def _log_worker_cmd(self, worker_id: str, cmd_type: str, details: str = ""):
         """Log a command being sent to a worker."""
-        self.tape.log("WORKER_SEND", worker_id, cmd_type, details)
+        self.instruction_stream.log("WORKER_SEND", worker_id, cmd_type, details)
 
     def _log_worker_response(self, worker_id: str, cmd_type: str, success: bool):
         """Log a response received from a worker."""
-        self.tape.log("WORKER_RECV", worker_id, cmd_type, f"success={success}")
+        self.instruction_stream.log("WORKER_RECV", worker_id, cmd_type, f"success={success}")

@@ -87,6 +87,7 @@ def _ensure_connected():
 
     # Auto-start local server
     import time
+    import os
     start_time = time.time()
     num_workers = _num_gpu_workers
     print(f"GT: Auto-starting local server with {num_workers} worker(s)...")
@@ -94,7 +95,12 @@ def _ensure_connected():
     from gt.worker.worker import Worker
     from gt.transport.connection import create_server, Connection
 
-    dispatcher = Dispatcher(host='localhost', port=0)  # Use port 0 for auto-assign
+    # Check for instruction log file from environment variable
+    log_file = os.environ.get('GT_INSTRUCTION_LOG', None)
+    if log_file:
+        print(f"GT: Instruction stream logging to: {log_file}")
+
+    dispatcher = Dispatcher(host='localhost', port=0, log_file=log_file, console_log=False)  # Use port 0 for auto-assign
     dispatcher.running = True
 
     # Create server socket
