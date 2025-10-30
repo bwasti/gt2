@@ -10,10 +10,15 @@ from .protocol import serialize, deserialize
 
 
 class Connection:
-    """Simple TCP connection wrapper."""
+    """Simple TCP connection wrapper with optimizations."""
 
     def __init__(self, sock):
         self.sock = sock
+        # Enable TCP_NODELAY for lower latency (disable Nagle's algorithm)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # Increase socket buffer sizes
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)  # 1MB
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)  # 1MB
 
     def send(self, obj):
         """Send an object over the connection."""
@@ -34,14 +39,20 @@ class Connection:
         return deserialize(data)
 
     def _recv_exactly(self, n):
-        """Receive exactly n bytes."""
-        data = b''
-        while len(data) < n:
-            chunk = self.sock.recv(n - len(data))
-            if not chunk:
+        """Receive exactly n bytes (optimized)."""
+        # Use a larger buffer to reduce number of recv() calls
+        data = bytearray(n)
+        view = memoryview(data)
+        pos = 0
+
+        while pos < n:
+            # Request remaining bytes, socket will return what's available
+            nread = self.sock.recv_into(view[pos:])
+            if nread == 0:
                 raise ConnectionError("Connection closed")
-            data += chunk
-        return data
+            pos += nread
+
+        return bytes(data)
 
     def close(self):
         """Close the connection."""
