@@ -1,6 +1,8 @@
-# Signal-Based Sharding Configuration
+# Signal-Based Configuration
 
-This guide shows how to use GT's signal-based sharding API to control tensor placement across workers.
+This guide shows how to use GT's signal-based configuration API to control:
+- **Tensor sharding** across workers (data/model/pipeline parallelism)
+- **Compilation boundaries** for torch.compile optimization
 
 ## Quick Start
 
@@ -107,6 +109,7 @@ This enables pipeline parallelism where forward and backward passes run on diffe
 
 ```yaml
 signal_name:
+  compile: <bool>            # If true, compile operations within this signal (default: false)
   shard:
     axis: <int>              # Which axis to shard (0=batch, 1=features, etc.)
     workers: [<int>, ...]    # List of worker IDs (null = all workers)
@@ -164,6 +167,33 @@ replicated_weights:
     workers: null            # All workers
     replicated: true         # Don't shard, replicate
 ```
+
+#### Compilation Directives
+```yaml
+# Enable torch.compile for operations within this signal
+compileme:
+  compile: true
+
+# Combine compilation with sharding
+compiled_layer:
+  compile: true
+  shard:
+    axis: 0
+    workers: [0, 1]
+```
+
+**Usage:**
+```python
+with gt.signal.context('compileme'):
+    x = y + b  # These operations will be batched
+    z = y * x  # and compiled together
+```
+
+**Benefits:**
+- Operations within the signal scope are batched and compiled together
+- torch.compile caches compiled graphs for reuse
+- Provides explicit control over compilation boundaries
+- Works alongside sharding configuration
 
 ## Environment Variables
 

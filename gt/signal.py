@@ -122,12 +122,29 @@ def context(name: str, backward: Optional[str] = None):
         with gt.signal.context('layer1', backward='layer1_bwd'):
             x = a + b  # Forward uses 'layer1', backward uses 'layer1_bwd'
     """
+    from gt.client.tensor import _client_connection, _connection_lock
+    from gt.transport.protocol import CompileStart, CompileEnd
+
+    if _client_connection:
+        with _connection_lock:
+            _client_connection.send(CompileStart(signal_name=name))
+            response = _client_connection.recv()
+            if not response.success:
+                raise RuntimeError(f"CompileStart failed: {response.error}")
+
     scope = SignalScope(name, backward)
     _signal_stack.push(scope)
     try:
         yield
     finally:
         _signal_stack.pop()
+
+        if _client_connection:
+            with _connection_lock:
+                _client_connection.send(CompileEnd(signal_name=name))
+                response = _client_connection.recv()
+                if not response.success:
+                    raise RuntimeError(f"CompileEnd failed: {response.error}")
 
 
 # Alias for backward compatibility
@@ -172,6 +189,16 @@ def enter(name: str, backward: Optional[str] = None):
         x = a + b
         gt.signal.exit('layer1')
     """
+    from gt.client.tensor import _client_connection, _connection_lock
+    from gt.transport.protocol import CompileStart
+
+    if _client_connection:
+        with _connection_lock:
+            _client_connection.send(CompileStart(signal_name=name))
+            response = _client_connection.recv()
+            if not response.success:
+                raise RuntimeError(f"CompileStart failed: {response.error}")
+
     scope = SignalScope(name, backward)
     _signal_stack.push(scope)
 
@@ -186,9 +213,20 @@ def exit(name: str):
     Raises:
         RuntimeError: If name doesn't match current scope
     """
+    from gt.client.tensor import _client_connection, _connection_lock
+    from gt.transport.protocol import CompileEnd
+
     current = _signal_stack.current()
     if current is None:
         raise RuntimeError(f"No signal scope to exit (expected '{name}')")
     if current.name != name:
         raise RuntimeError(f"Signal scope mismatch: expected '{name}', got '{current.name}'")
+
     _signal_stack.pop()
+
+    if _client_connection:
+        with _connection_lock:
+            _client_connection.send(CompileEnd(signal_name=name))
+            response = _client_connection.recv()
+            if not response.success:
+                raise RuntimeError(f"CompileEnd failed: {response.error}")

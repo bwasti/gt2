@@ -11,8 +11,9 @@ import time
 from gt.transport.connection import create_server, Connection
 from gt.transport.protocol import (
     ClientCommand, CreateTensor, BinaryOp, UnaryOp, GetData, FreeTensor, CopyTensor,
+    CompileStart, CompileEnd,
     ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
-    WorkerGetData, WorkerFreeTensor, WorkerResponse
+    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerResponse
 )
 from gt.dispatcher.tensor_handle import TensorHandle
 
@@ -236,6 +237,10 @@ class Dispatcher:
                 return self._handle_free_tensor(cmd, client_id)
             elif isinstance(cmd, CopyTensor):
                 return self._handle_copy_tensor(cmd, client_id)
+            elif isinstance(cmd, CompileStart):
+                return self._handle_compile_start(cmd, client_id)
+            elif isinstance(cmd, CompileEnd):
+                return self._handle_compile_end(cmd, client_id)
             else:
                 return ClientResponse(success=False, error=f"Unknown command: {type(cmd)}")
         except Exception as e:
@@ -787,6 +792,50 @@ class Dispatcher:
                 return worker
         return None
 
+    def _handle_compile_start(self, cmd: CompileStart, client_id: str) -> ClientResponse:
+        """Handle compile start - check config and forward to workers if needed."""
+        from gt.config import get_signal_config
+
+        signal_config = get_signal_config(cmd.signal_name)
+        should_compile = signal_config and signal_config.compile
+
+        if not should_compile:
+            return ClientResponse(success=True)
+
+        for worker in self.workers:
+            worker_cmd = WorkerCompileStart(signal_name=cmd.signal_name)
+            self._log_worker_cmd(worker["id"], "WorkerCompileStart", f"signal={cmd.signal_name}")
+            worker["conn"].send(worker_cmd)
+            worker_response: WorkerResponse = worker["conn"].recv()
+            self._log_worker_response(worker["id"], "WorkerCompileStart", worker_response.success)
+
+            if not worker_response.success:
+                return ClientResponse(success=False, error=f"Worker {worker['id']} failed: {worker_response.error}")
+
+        return ClientResponse(success=True)
+
+    def _handle_compile_end(self, cmd: CompileEnd, client_id: str) -> ClientResponse:
+        """Handle compile end - check config and forward to workers if needed."""
+        from gt.config import get_signal_config
+
+        signal_config = get_signal_config(cmd.signal_name)
+        should_compile = signal_config and signal_config.compile
+
+        if not should_compile:
+            return ClientResponse(success=True)
+
+        for worker in self.workers:
+            worker_cmd = WorkerCompileEnd(signal_name=cmd.signal_name)
+            self._log_worker_cmd(worker["id"], "WorkerCompileEnd", f"signal={cmd.signal_name}")
+            worker["conn"].send(worker_cmd)
+            worker_response: WorkerResponse = worker["conn"].recv()
+            self._log_worker_response(worker["id"], "WorkerCompileEnd", worker_response.success)
+
+            if not worker_response.success:
+                return ClientResponse(success=False, error=f"Worker {worker['id']} failed: {worker_response.error}")
+
+        return ClientResponse(success=True)
+
     def _get_cmd_details(self, cmd) -> str:
         """Extract useful details from command for logging."""
         if isinstance(cmd, CreateTensor):
@@ -803,6 +852,10 @@ class Dispatcher:
             return f"tensor_id={cmd.tensor_id}"
         elif isinstance(cmd, CopyTensor):
             return f"dest={cmd.dest_id} src={cmd.src_id}"
+        elif isinstance(cmd, CompileStart):
+            return f"signal={cmd.signal_name}"
+        elif isinstance(cmd, CompileEnd):
+            return f"signal={cmd.signal_name}"
         return ""
 
     def _log_worker_cmd(self, worker_id: str, cmd_type: str, details: str = ""):

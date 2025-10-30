@@ -12,7 +12,7 @@ from typing import List, Dict, Any
 from gt.transport.connection import connect, Connection
 from gt.transport.protocol import (
     WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
-    WorkerGetData, WorkerFreeTensor, WorkerResponse
+    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerResponse
 )
 from gt.worker.engine import create_engine, Engine, Operation
 
@@ -38,6 +38,10 @@ class Worker:
 
         # Batch accumulator for compilation
         self.pending_operations: List[tuple] = []  # (cmd, response_placeholder)
+
+        # Compilation region tracking
+        self.in_compile_region = False
+        self.current_compile_signal = None
 
         # Create engine
         self.engine: Engine = create_engine(backend)
@@ -109,6 +113,10 @@ class Worker:
                 return self._handle_get_data(cmd)
             elif isinstance(cmd, WorkerFreeTensor):
                 return self._handle_free_tensor(cmd)
+            elif isinstance(cmd, WorkerCompileStart):
+                return self._handle_compile_start(cmd)
+            elif isinstance(cmd, WorkerCompileEnd):
+                return self._handle_compile_end(cmd)
             else:
                 return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
         except Exception as e:
@@ -279,4 +287,23 @@ class Worker:
         """Free a tensor."""
         if cmd.tensor_id in self.tensors:
             del self.tensors[cmd.tensor_id]
+        return WorkerResponse(success=True)
+
+    def _handle_compile_start(self, cmd: WorkerCompileStart) -> WorkerResponse:
+        """Handle compilation region start."""
+        self.in_compile_region = True
+        self.current_compile_signal = cmd.signal_name
+        return WorkerResponse(success=True)
+
+    def _handle_compile_end(self, cmd: WorkerCompileEnd) -> WorkerResponse:
+        """Handle compilation region end - flush any pending operations."""
+        if cmd.signal_name != self.current_compile_signal:
+            return WorkerResponse(success=False,
+                error=f"Signal mismatch: expected {self.current_compile_signal}, got {cmd.signal_name}")
+
+        if self.pending_operations:
+            self._flush_batch()
+
+        self.in_compile_region = False
+        self.current_compile_signal = None
         return WorkerResponse(success=True)

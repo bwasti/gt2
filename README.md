@@ -90,6 +90,7 @@ with gt.signal.context('pipeline_stage_1', backward='pipeline_stage_1_bwd'):
 - Pipeline parallelism (stage-wise worker assignment)
 - Replicated parameters
 - Per-layer sharding strategies
+- Compilation directives (`compile: true` for torch.compile boundaries)
 
 See [examples/README_SIGNALS.md](examples/README_SIGNALS.md) for comprehensive guide.
 
@@ -450,7 +451,9 @@ This code is designed to be **SIMPLE and READABLE** for ML researchers. We prior
 See [examples/](examples/) directory:
 
 - `signal_demo.py` - Signal-based sharding demonstration
+- `compile_demo.py` - Compilation directives demonstration
 - `config_sharding.yaml` - Example sharding configuration
+- `config_compile.yaml` - Example compilation configuration
 - `demo.py` - Basic tensor operations
 - `simple_launch.py` - Manual server/worker launch
 

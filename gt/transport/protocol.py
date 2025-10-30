@@ -68,6 +68,18 @@ class CopyTensor(ClientCommand):
 
 
 @dataclass
+class CompileStart(ClientCommand):
+    """Mark the start of a compilation region."""
+    signal_name: str  # Signal name for this compilation region
+
+
+@dataclass
+class CompileEnd(ClientCommand):
+    """Mark the end of a compilation region."""
+    signal_name: str  # Signal name for this compilation region
+
+
+@dataclass
 class ClientResponse:
     """Response from dispatcher to client."""
     success: bool
@@ -128,6 +140,18 @@ class WorkerMoveTensor(WorkerCommand):
     """Move tensor to another worker."""
     tensor_id: str
     target_worker: str  # worker address
+
+
+@dataclass
+class WorkerCompileStart(WorkerCommand):
+    """Signal worker to start a compilation region."""
+    signal_name: str
+
+
+@dataclass
+class WorkerCompileEnd(WorkerCommand):
+    """Signal worker to end a compilation region and compile."""
+    signal_name: str
 
 
 @dataclass

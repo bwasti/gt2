@@ -1,0 +1,11 @@
+# Example configuration with compilation directive
+
+compileme:
+  compile: true  # Operations within this signal scope will be compiled
+
+# Example with both sharding and compilation
+compiled_sharded:
+  compile: true
+  shard:
+    axis: 0
+    workers: [0, 1]

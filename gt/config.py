@@ -24,6 +24,7 @@ class SignalConfig:
     """Configuration for a signal scope."""
     shard: Optional[ShardConfig] = None
     backward_signal: Optional[str] = None  # Name of signal for backward pass
+    compile: bool = False  # If True, compile operations within this signal scope
 
 
 class Config:
@@ -90,10 +91,12 @@ class Config:
             )
 
         backward_signal = signal_dict.get('backward', None)
+        compile_enabled = signal_dict.get('compile', False)
 
         return SignalConfig(
             shard=shard_config,
-            backward_signal=backward_signal
+            backward_signal=backward_signal,
+            compile=compile_enabled
         )
 
     def get_signal(self, name: str) -> Optional[SignalConfig]:
