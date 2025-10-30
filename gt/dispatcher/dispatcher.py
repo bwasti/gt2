@@ -142,14 +142,25 @@ class Dispatcher:
     def _handle_binary_op(self, cmd: BinaryOp, client_id: str) -> ClientResponse:
         """Handle binary operation."""
         # Get locations of input tensors
-        left_loc = self.tensor_handles.get_location(client_id, cmd.left_id)
-        right_loc = self.tensor_handles.get_location(client_id, cmd.right_id)
+        left_locs = self.tensor_handles.get_locations(client_id, cmd.left_id)
+        right_locs = self.tensor_handles.get_locations(client_id, cmd.right_id)
 
-        if not left_loc or not right_loc:
+        if not left_locs or not right_locs:
             return ClientResponse(success=False, error="Input tensor not found")
 
+        # Check if tensors are sharded
+        left_sharded = len(left_locs) > 1
+        right_sharded = len(right_locs) > 1
+
+        # DISTRIBUTED MATMUL: A @ B where A is sharded on axis 0
+        if cmd.op == "matmul" and left_sharded and not right_sharded:
+            return self._handle_distributed_matmul(cmd, client_id, left_locs, right_locs)
+
+        # Non-sharded case (or both on same worker)
+        left_loc = left_locs[0]
+        right_loc = right_locs[0]
+
         # For now, assume they're on the same worker
-        # TODO: handle cross-worker operations
         if left_loc.worker_id != right_loc.worker_id:
             return ClientResponse(success=False, error="Cross-worker ops not yet supported")
 
@@ -190,6 +201,13 @@ class Dispatcher:
         """Handle unary operation."""
         # For ops like randn that don't have inputs
         if cmd.input_id is None:
+            # SHARDING LOGIC: If we have multiple workers, shard across workers
+            num_workers = len(self.workers)
+            if num_workers > 1 and cmd.shape and len(cmd.shape) >= 2:
+                # Shard along axis 0 (rows)
+                return self._handle_sharded_creation(cmd, client_id, shard_axis=0)
+
+            # Single worker or non-shardable - use old logic
             worker = self._pick_worker()
             if not worker:
                 return ClientResponse(success=False, error="No workers available")
@@ -255,10 +273,36 @@ class Dispatcher:
 
     def _handle_get_data(self, cmd: GetData, client_id: str) -> ClientResponse:
         """Handle data request."""
-        loc = self.tensor_handles.get_location(client_id, cmd.tensor_id)
-        if not loc:
+        locs = self.tensor_handles.get_locations(client_id, cmd.tensor_id)
+        if not locs:
             return ClientResponse(success=False, error="Tensor not found")
 
+        # If sharded, gather all shards and concatenate
+        if len(locs) > 1:
+            import numpy as np
+
+            shards = []
+            for loc in sorted(locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0):
+                worker = self._get_worker(loc.worker_id)
+                if not worker:
+                    return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
+
+                worker_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+                worker["conn"].send(worker_cmd)
+                worker_response: WorkerResponse = worker["conn"].recv()
+
+                if not worker_response.success:
+                    return ClientResponse(success=False, error=worker_response.error)
+
+                shards.append(worker_response.data)
+
+            # Concatenate along the sharded axis
+            shard_axis = locs[0].shard_info.axis if locs[0].shard_info else 0
+            combined_data = np.concatenate(shards, axis=shard_axis)
+            return ClientResponse(success=True, data=combined_data)
+
+        # Non-sharded case
+        loc = locs[0]
         worker = self._get_worker(loc.worker_id)
         if not worker:
             return ClientResponse(success=False, error="Worker not found")
@@ -288,6 +332,145 @@ class Dispatcher:
                 pass  # Worker might be dead
 
         self.tensor_handles.free(client_id, cmd.tensor_id)
+        return ClientResponse(success=True)
+
+    def _handle_distributed_matmul(self, cmd: BinaryOp, client_id: str, left_locs, right_locs) -> ClientResponse:
+        """
+        Handle distributed matmul: A @ B where A is sharded on axis 0.
+
+        Each worker computes: A_shard @ B (locally)
+        Then we need to gather all results (no all-reduce needed for row-sharded A).
+        Result is sharded on axis 0 (same as A).
+        """
+        from gt.dispatcher.tensor_handle import ShardInfo
+        import numpy as np
+
+        # Broadcast B to all workers (if not already there)
+        right_loc = right_locs[0]
+
+        # For each shard of A, compute A_shard @ B
+        result_locs = []
+        for shard_idx, left_loc in enumerate(left_locs):
+            worker = self._get_worker(left_loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {left_loc.worker_id} not found")
+
+            # First, ensure B is on this worker
+            # For simplicity, create a copy of B on each worker
+            b_copy_id = f"{client_id}_{cmd.right_id}_copy_worker{shard_idx}"
+
+            # Get B from original worker
+            right_worker = self._get_worker(right_loc.worker_id)
+            if not right_worker:
+                return ClientResponse(success=False, error="Right worker not found")
+
+            # Fetch B data
+            get_cmd = WorkerGetData(tensor_id=right_loc.worker_tensor_id)
+            right_worker["conn"].send(get_cmd)
+            right_response: WorkerResponse = right_worker["conn"].recv()
+            if not right_response.success:
+                return ClientResponse(success=False, error="Failed to get B data")
+
+            # Create B on this worker
+            create_b_cmd = WorkerCreateTensor(
+                tensor_id=b_copy_id,
+                data=right_response.data,
+                dtype=right_loc.dtype,
+                shape=right_loc.shape
+            )
+            worker["conn"].send(create_b_cmd)
+            create_response: WorkerResponse = worker["conn"].recv()
+            if not create_response.success:
+                return ClientResponse(success=False, error="Failed to create B copy")
+
+            # Now compute A_shard @ B on this worker
+            result_tensor_id = f"{client_id}_{cmd.result_id}_shard{shard_idx}"
+
+            matmul_cmd = WorkerBinaryOp(
+                result_id=result_tensor_id,
+                op="matmul",
+                left_id=left_loc.worker_tensor_id,
+                right_id=b_copy_id
+            )
+            worker["conn"].send(matmul_cmd)
+            matmul_response: WorkerResponse = worker["conn"].recv()
+
+            if not matmul_response.success:
+                return ClientResponse(success=False, error=f"Matmul failed on worker {left_loc.worker_id}")
+
+            # Register result shard
+            result_shape = list(left_loc.shape)
+            result_shape[-1] = right_loc.shape[-1]  # Output columns from B
+
+            shard_info = ShardInfo(
+                axis=0,  # Result sharded on axis 0
+                num_shards=len(left_locs),
+                shard_index=shard_idx
+            )
+
+            self.tensor_handles.register(
+                client_id=client_id,
+                tensor_id=cmd.result_id,
+                worker_id=worker["id"],
+                worker_tensor_id=result_tensor_id,
+                shape=tuple(result_shape),
+                dtype=left_loc.dtype,
+                shard_info=shard_info
+            )
+
+        return ClientResponse(success=True)
+
+    def _handle_sharded_creation(self, cmd: UnaryOp, client_id: str, shard_axis: int) -> ClientResponse:
+        """Create a sharded tensor across all workers."""
+        from gt.dispatcher.tensor_handle import ShardInfo
+        import numpy as np
+
+        num_workers = len(self.workers)
+        full_shape = list(cmd.shape)
+
+        # Calculate shard size (divide axis by num_workers)
+        if full_shape[shard_axis] % num_workers != 0:
+            return ClientResponse(success=False,
+                error=f"Cannot shard axis {shard_axis} of size {full_shape[shard_axis]} across {num_workers} workers evenly")
+
+        shard_size = full_shape[shard_axis] // num_workers
+        shard_shape = list(full_shape)
+        shard_shape[shard_axis] = shard_size
+
+        # Create shard on each worker
+        for shard_idx, worker in enumerate(self.workers):
+            result_tensor_id = f"{client_id}_{cmd.result_id}_shard{shard_idx}"
+
+            worker_cmd = WorkerUnaryOp(
+                result_id=result_tensor_id,
+                op=cmd.op,
+                input_id=None,
+                shape=tuple(shard_shape),
+                dtype=cmd.dtype
+            )
+            worker["conn"].send(worker_cmd)
+            worker_response: WorkerResponse = worker["conn"].recv()
+
+            if not worker_response.success:
+                return ClientResponse(success=False, error=worker_response.error)
+
+            # Register this shard
+            shard_info = ShardInfo(
+                axis=shard_axis,
+                num_shards=num_workers,
+                shard_index=shard_idx
+            )
+
+            self.tensor_handles.register(
+                client_id=client_id,
+                tensor_id=cmd.result_id,
+                worker_id=worker["id"],
+                worker_tensor_id=result_tensor_id,
+                shape=tuple(shard_shape),
+                dtype=cmd.dtype,
+                shard_info=shard_info
+            )
+
         return ClientResponse(success=True)
 
     def _pick_worker(self):
