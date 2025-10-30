@@ -19,10 +19,6 @@ Terminal N+1 - Run this script:
     python examples/simple_auto_shard.py --distributed
 """
 
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-
 import numpy as np
 import argparse
 

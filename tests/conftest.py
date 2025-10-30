@@ -7,9 +7,6 @@ Keep this SIMPLE and READABLE.
 import pytest
 import threading
 import time
-import sys
-
-sys.path.insert(0, '/home/bwasti/oss/gt2')
 
 from gt.dispatcher.dispatcher import Dispatcher
 from gt.worker.worker import Worker

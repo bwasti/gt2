@@ -4,6 +4,8 @@ Compare PyTorch baseline vs GT framework performance.
 
 import sys
 import os
+
+# For benchmarks, we still need this since they're not part of the package
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytorch_baseline
