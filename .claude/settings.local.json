@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(timeout 30 python:*)"
+      "Bash(timeout 30 python:*)",
+      "Bash(python /home/bwasti/oss/gt2/benchmarks/profile_overhead.py:*)"
     ],
     "deny": [],
     "ask": []
