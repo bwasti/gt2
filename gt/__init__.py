@@ -100,6 +100,13 @@ def _ensure_connected():
     if log_file:
         print(f"GT: Instruction stream logging to: {log_file}")
 
+    # Check for config file from environment variable
+    config_file = os.environ.get('GT_CONFIG', None)
+    if config_file:
+        print(f"GT: Loading sharding config from: {config_file}")
+        from gt.config import load_config as _load_config
+        _load_config(config_file)
+
     dispatcher = Dispatcher(host='localhost', port=0, log_file=log_file, console_log=False)  # Use port 0 for auto-assign
     dispatcher.running = True
 
@@ -297,8 +304,7 @@ class no_grad:
 
 
 # Signal API for configuration-based sharding
-from gt import signal  # Import module for signal.enter() / signal.exit()
-from gt.signal import signal_tensor  # Import function for gt.signal_tensor()
+from gt import signal  # Import module for signal.context() and signal.tensor()
 
 # Config loading
 from gt.config import load_config, get_config, get_signal_config

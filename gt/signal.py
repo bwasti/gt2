@@ -104,7 +104,7 @@ def current_backward_signal() -> Optional[str]:
 
 
 @contextmanager
-def signal(name: str, backward: Optional[str] = None):
+def context(name: str, backward: Optional[str] = None):
     """
     Signal context manager.
 
@@ -116,10 +116,10 @@ def signal(name: str, backward: Optional[str] = None):
         backward: Optional signal name for backward pass
 
     Example:
-        with gt.signal('layer1'):
+        with gt.signal.context('layer1'):
             x = a + b  # Addition happens in sharded mode
 
-        with gt.signal('layer1', backward='layer1_bwd'):
+        with gt.signal.context('layer1', backward='layer1_bwd'):
             x = a + b  # Forward uses 'layer1', backward uses 'layer1_bwd'
     """
     scope = SignalScope(name, backward)
@@ -130,7 +130,11 @@ def signal(name: str, backward: Optional[str] = None):
         _signal_stack.pop()
 
 
-def signal_tensor(tensor: 'Tensor', name: str, backward_name: Optional[str] = None) -> 'Tensor':
+# Alias for backward compatibility
+signal = context
+
+
+def tensor(tensor_arg: 'Tensor', name: str, backward_name: Optional[str] = None) -> 'Tensor':
     """
     Apply signal to a tensor (copy-shard only, not compute).
 
@@ -138,7 +142,7 @@ def signal_tensor(tensor: 'Tensor', name: str, backward_name: Optional[str] = No
     Use the context manager to shard the compute as well.
 
     Args:
-        tensor: Tensor to apply signal to
+        tensor_arg: Tensor to apply signal to
         name: Signal name
         backward_name: Optional signal name for gradients
 
@@ -147,13 +151,13 @@ def signal_tensor(tensor: 'Tensor', name: str, backward_name: Optional[str] = No
 
     Example:
         x = gt.randn(100, 100)
-        x_sharded = gt.signal(x, name='layer1')
+        x_sharded = gt.signal.tensor(x, name='layer1')
     """
     # TODO: Implement tensor copy-sharding
     # For now, just attach signal metadata
-    tensor._signal_name = name
-    tensor._backward_signal_name = backward_name
-    return tensor
+    tensor_arg._signal_name = name
+    tensor_arg._backward_signal_name = backward_name
+    return tensor_arg
 
 
 # Convenience functions for entering/exiting scopes (alternative API)

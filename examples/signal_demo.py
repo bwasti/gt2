@@ -5,6 +5,7 @@ This demonstrates how to use signals to control tensor sharding across workers.
 """
 
 import os
+# Set config via environment variable (loaded automatically on import)
 os.environ['GT_CONFIG'] = 'examples/config_sharding.yaml'
 
 import gt
@@ -13,14 +14,12 @@ import numpy as np
 print("=" * 60)
 print("Signal-Based Sharding Demo")
 print("=" * 60)
-
-# Load sharding configuration
-gt.load_config('examples/config_sharding.yaml')
+print("\nConfig automatically loaded from GT_CONFIG environment variable")
 
 print("\n1. Context Manager API - Shards tensors AND compute")
 print("-" * 60)
 
-with gt.signal.signal('forward_layer1'):
+with gt.signal.context('forward_layer1'):
     # These tensors will be created according to 'forward_layer1' config
     # (sharded across workers [0,1,2,3] along axis 0)
     a = gt.randn(100, 64)
@@ -42,14 +41,14 @@ x = gt.randn(50, 32)
 print(f"Created x without signal: shape = {x.shape}")
 
 # Now apply signal to copy-shard it
-x_sharded = gt.signal_tensor(x, name='feature_parallel')
+x_sharded = gt.signal.tensor(x, name='feature_parallel')
 print(f"Applied 'feature_parallel' signal to x")
 print(f"  x_sharded will be sharded along axis 1 across workers [0,1]")
 
 print("\n3. Backward Pass Signals")
 print("-" * 60)
 
-with gt.signal.signal('pipeline_stage_1', backward='pipeline_stage_1_bwd'):
+with gt.signal.context('pipeline_stage_1', backward='pipeline_stage_1_bwd'):
     # Forward pass uses 'pipeline_stage_1' config (workers [0,1])
     # Backward pass will use 'pipeline_stage_1_bwd' config (workers [2,3])
     y = gt.randn(32, 16)
