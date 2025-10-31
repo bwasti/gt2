@@ -1,6 +1,6 @@
-# GT2 - Graph Tensor System
+# GT2
 
-A distributed tensor framework with a PyTorch-like API.
+A distributed multiplexing tensor framework.  Top notch API.
 
 ## Features
 
