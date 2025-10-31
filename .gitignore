@@ -29,3 +29,6 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated data
+examples/qwen3/data/

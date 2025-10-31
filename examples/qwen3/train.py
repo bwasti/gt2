@@ -185,6 +185,15 @@ def main():
 
     print(f"Config: batch_size={batch_size}, lr={learning_rate}, epochs={num_epochs}")
 
+    # Check if data exists, if not, prepare it
+    input_ids_path = f"{data_dir}/input_ids.npy"
+    if not os.path.exists(input_ids_path):
+        print(f"\nData not found at {data_dir}")
+        print("Preparing synthetic training data...")
+        from prepare_data import prepare_synthetic_data
+        prepare_synthetic_data(model_size)
+        print("Data preparation complete!")
+
     # Load data
     print(f"\nLoading data from {data_dir}...")
     input_ids = np.load(f"{data_dir}/input_ids.npy")

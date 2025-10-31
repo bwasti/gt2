@@ -142,6 +142,21 @@ def create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000):
     return tokenized_examples
 
 
+def prepare_synthetic_data(model_size='tiny'):
+    """
+    Prepare synthetic data for training (reusable function).
+
+    Args:
+        model_size: Model size ('tiny' or '1.7B')
+    """
+    if model_size == 'tiny':
+        # Create synthetic data for testing
+        tokenized = create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000)
+        save_dataset(tokenized)
+    else:
+        raise ValueError(f"prepare_synthetic_data only supports 'tiny' model, got '{model_size}'")
+
+
 def main():
     """Download and prepare dataset."""
     # Check if using tiny model (no tokenizer available)
@@ -151,8 +166,7 @@ def main():
     if model_size == 'tiny':
         # Create synthetic data for testing
         print("Using TINY model - creating synthetic data for testing")
-        tokenized = create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000)
-        save_dataset(tokenized)
+        prepare_synthetic_data(model_size)
         print("\nSynthetic dataset ready!")
         print("Training data ready at: examples/qwen3/data/")
         return
