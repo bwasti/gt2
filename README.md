@@ -2,6 +2,8 @@
 
 A distributed multiplexing tensor framework.  Top notch API.
 
+**Designed for AI-assisted development:** This codebase prioritizes clarity, comprehensive documentation, and debugging utilities to enable seamless collaboration between humans and AI coding assistants. See [AI Development](#optimized-for-ai-development) for details.
+
 ## Features
 
 - **High-performance transport** - ZeroMQ (ZMQ) with automatic message batching and efficient DEALER/ROUTER pattern
@@ -28,6 +30,41 @@ For distributed training, see [Distributed Setup](#distributed-setup).
 ## Stream Processing
 
 Workers process operations one at a time as they arrive from the dispatcher. This keeps the architecture simple and easy to reason about. Future optimizations may include automatic hot path detection and torch.compile() for repeated operation sequences.
+
+## Optimized for AI Development
+
+GT2 is designed to be understood, modified, and debugged with AI coding assistants:
+
+### 1. **Architecture Documentation for AI**
+- [CLAUDE.md](CLAUDE.md) provides detailed architectural context optimized for Claude and other AI assistants
+- Explicit codebase structure, design decisions, and implementation patterns
+- Helps AI quickly understand the system and make consistent changes
+
+### 2. **Declarative Configuration via YAML**
+- Sharding strategies defined in human-readable YAML configs
+- Easy for AI to parse, understand, and generate configurations
+- Clear mapping between signals and worker assignments
+- See [Signal-Based Sharding](#signal-based-sharding-configuration)
+
+### 3. **Debugging Utilities**
+- **Tape-based autograd** - Inspect gradient computation graph with `gt.debug.print_tape()`
+- **Instruction stream logging** - Track every operation with timestamps via `GT_INSTRUCTION_LOG`
+- **Worker statistics** - View operation counts and performance metrics
+- Makes it easy to identify bugs and understand execution flow
+
+### 4. **Comprehensive Test Suite**
+- 50+ tests covering tensor operations, autograd, distributed execution
+- Tests serve as executable documentation and specifications
+- Easy for AI to understand intended behavior and verify changes
+- See [Running Tests](#running-tests)
+
+### 5. **Standard API**
+- PyTorch-compatible API that AI models are already trained on
+- Familiar patterns like `Module`, `Linear`, `SGD`, `backward()`
+- Extensive inline documentation and type hints
+- Reduces cognitive load when making changes
+
+**Why this matters:** When collaborating with AI assistants, code clarity and debugging tools are multiplicative. This design enables rapid iteration, confident refactoring, and effective troubleshooting.
 
 ## Signal-Based Sharding Configuration
 
