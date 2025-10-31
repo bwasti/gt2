@@ -133,8 +133,13 @@ class PyTorchEngine(Engine):
 
             for op in operations:
                 if op.op_type == 'binary':
-                    left = tensor_dict.get(op.input_ids[0])
-                    right = tensor_dict.get(op.input_ids[1])
+                    # Check results first (for intermediate tensors), then tensor_dict
+                    left = results.get(op.input_ids[0])
+                    if left is None:
+                        left = tensor_dict.get(op.input_ids[0])
+                    right = results.get(op.input_ids[1])
+                    if right is None:
+                        right = tensor_dict.get(op.input_ids[1])
 
                     if op.op_name == 'add':
                         results[op.result_id] = left + right
@@ -152,7 +157,10 @@ class PyTorchEngine(Engine):
                         raise ValueError(f"Unknown binary op: {op.op_name}")
 
                 elif op.op_type == 'unary':
-                    input_tensor = tensor_dict.get(op.input_ids[0])
+                    # Check results first (for intermediate tensors), then tensor_dict
+                    input_tensor = results.get(op.input_ids[0])
+                    if input_tensor is None:
+                        input_tensor = tensor_dict.get(op.input_ids[0])
 
                     if op.op_name == 'relu':
                         results[op.result_id] = self.torch.relu(input_tensor)
@@ -197,37 +205,25 @@ class PyTorchEngine(Engine):
 
         Returns:
             Dictionary of newly created tensors (result_id -> tensor)
-
-        TODO: Batched execution is currently broken - graph building doesn't handle
-        all tensor dependencies correctly, resulting in NoneType errors. Intermediate
-        tensors from scalar operations (e.g., from .sum(), .mean()) aren't being
-        tracked properly in the operation graph. Need to fix tensor dependency
-        tracking in the worker or dispatcher.
         """
         if not self.enable_compilation or len(operations) == 1:
             # Fall back to eager execution for single operations
             return self._execute_eager(operations, tensors)
 
-        # Compute graph signature
-        signature = self._compute_graph_signature(operations)
+        # Build and compile the graph function
+        # NOTE: We rebuild the graph for each batch because the operations list
+        # contains specific tensor IDs. Caching would require making the function
+        # independent of tensor IDs (e.g., using positional arguments).
+        graph_fn = self._build_graph_function(operations)
 
-        # Check cache
-        if signature in self._compiled_cache:
-            compiled_fn = self._compiled_cache[signature]
-            self._cache_hits += 1
-        else:
-            # Build and compile the graph function
-            graph_fn = self._build_graph_function(operations)
-
-            # Compile with torch.compile
-            try:
-                compiled_fn = self.torch.compile(graph_fn, mode="default")
-                self._compiled_cache[signature] = compiled_fn
-                self._cache_misses += 1
-            except Exception as e:
-                # Fall back to eager if compilation fails
-                print(f"Warning: Compilation failed ({e}), falling back to eager execution")
-                return self._execute_eager(operations, tensors)
+        # Compile with torch.compile
+        try:
+            compiled_fn = self.torch.compile(graph_fn, mode="default")
+            self._cache_misses += 1
+        except Exception as e:
+            # Fall back to eager if compilation fails
+            print(f"Warning: Compilation failed ({e}), falling back to eager execution")
+            return self._execute_eager(operations, tensors)
 
         # Execute compiled function
         results = compiled_fn(tensors.copy())

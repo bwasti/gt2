@@ -27,17 +27,26 @@ For distributed training, see [Distributed Setup](#distributed-setup).
 
 ## Instruction Batching & torch.compile
 
-Workers can batch operations and compile them with `torch.compile()`:
+Workers can batch operations and optionally compile them with `torch.compile()`:
 
 ```bash
 # Enable batching (default: eager mode)
 GT_WORKER_BATCH_SIZE=10 python your_script.py
+
+# Enable batching + torch.compile (default: compilation disabled)
+GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 python your_script.py
 ```
 
 **Behavior:**
-- First execution: Compilation overhead (~10s observed in tests)
-- Subsequent executions: Faster execution via cached compiled functions
+- **Batching only** (`GT_COMPILE=0`, default): Groups operations for efficient execution without compilation overhead
+- **Batching + compilation** (`GT_COMPILE=1`): Applies `torch.compile()` to batched operations
+- Each batch gets its own compiled function (no cross-batch caching due to tensor ID dependencies)
 - Performance varies based on operation patterns and hardware
+
+**When to use compilation:**
+- Training loops with repeated operation patterns
+- Large models where compilation overhead is amortized
+- Not recommended for one-off operations or small models
 
 See [docs/BATCHING_AND_COMPILATION.md](docs/BATCHING_AND_COMPILATION.md) for details.
 
@@ -265,12 +274,14 @@ c = a @ b
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `GT_WORKER_BATCH_SIZE` | Batch size for instruction batching | `1` (eager) |
+| `GT_COMPILE` | Enable torch.compile() on batched operations | `0` (disabled) |
 | `GT_CONFIG` | Path to sharding config YAML | None |
 | `GT_INSTRUCTION_LOG` | Path to instruction stream log file | None |
 
 Example:
 ```bash
 GT_WORKER_BATCH_SIZE=10 \
+GT_COMPILE=1 \
 GT_CONFIG=sharding.yaml \
 GT_INSTRUCTION_LOG=debug.log \
 python train.py
@@ -355,6 +366,9 @@ pytest tests/test_mlp.py -v
 
 # Test with batching enabled
 GT_WORKER_BATCH_SIZE=10 pytest tests/ -v
+
+# Test with batching and compilation enabled
+GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 pytest tests/test_compilation.py -v
 ```
 
 Tests auto-start a local GT system and verify numeric correctness.
