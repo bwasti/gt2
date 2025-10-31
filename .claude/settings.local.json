@@ -4,7 +4,8 @@
       "Bash(timeout 30 python:*)",
       "Bash(python /home/bwasti/oss/gt2/benchmarks/profile_overhead.py:*)",
       "Bash(python examples/debug_demo.py:*)",
-      "Bash(GT_WORKER_BATCH_SIZE=10 python train.py:*)"
+      "Bash(GT_WORKER_BATCH_SIZE=10 python train.py:*)",
+      "Bash(python -m cProfile:*)"
     ],
     "deny": [],
     "ask": []
