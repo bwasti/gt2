@@ -1,8 +1,23 @@
-# Hot Path Detection Integration
+# Hot Path Detection Integration (Stream-Based)
 
-## Overview
+## Key Insight
 
-The hot path detector automatically enables torch.compile() when it detects repeated batch patterns at the worker level.
+**Hot path detection operates on the INSTRUCTION STREAM**, not on batches.
+
+- **Batching** = transport optimization (reducing network round-trips)
+- **Stream** = semantic structure (the actual sequence of operations)
+
+The detector should see individual instructions as they arrive.
+
+## Stream-Based Architecture
+
+```
+Dispatcher → Network → Worker._process_command()
+                          ↓
+                    [record_instruction]  ← Hot path detector sees this
+                          ↓
+                    Execute operation
+```
 
 ## Integration with Worker
 
@@ -17,153 +32,158 @@ class Worker:
     def __init__(self, worker_id: str, backend="pytorch", batch_size: int = None):
         # ... existing init code ...
 
-        # Hot path detection (only if enabled)
+        # Hot path detection (stream-based)
         self.hotpath_detector = None
         if os.environ.get('GT_AUTO_COMPILE', '0') == '1':
             self.hotpath_detector = HotPathDetector(
-                hot_threshold=int(os.environ.get('GT_HOTPATH_THRESHOLD', '10')),
-                enable_auto_compile=True
+                window_size=20,  # Track last 20 instructions
+                hot_threshold=10,  # Detect after 10 repetitions
+                min_sequence_length=5  # Minimum 5-op sequences
             )
-            print(f"Worker {worker_id}: Hot path detection enabled")
+            print(f"Worker {worker_id}: Stream-based hot path detection enabled")
 ```
 
-### 2. Check detector in _flush_batch()
+### 2. Record instructions as they arrive
 
 ```python
 # In gt/worker/worker.py
 
-def _flush_batch(self):
-    """Execute all pending operations as a batch."""
-    if not self.pending_operations:
-        return
-
-    # Convert commands to Operation objects
-    operations = []
-    for cmd in self.pending_operations:
-        # ... existing conversion code ...
-        operations.append(Operation(...))
-
-    # Hot path detection: should we compile this batch?
-    should_compile_batch = False
-    if self.hotpath_detector:
-        should_compile_batch = self.hotpath_detector.record_batch(operations)
-
-    # Execute batch with dynamic compilation decision
+def _process_command(self, cmd: WorkerCommand) -> WorkerResponse:
+    """Process a command from dispatcher."""
     try:
-        # Option 1: Override engine's compilation setting for this batch
-        if should_compile_batch and not self.engine.enable_compilation:
-            # Temporarily enable compilation for this hot batch
-            original_setting = self.engine.enable_compilation
-            self.engine.enable_compilation = True
-            results = self.engine.execute_batch(operations, self.tensors)
-            self.engine.enable_compilation = original_setting
-        else:
-            results = self.engine.execute_batch(operations, self.tensors)
-
-        # Update tensor storage
-        for result_id, tensor in results.items():
-            self.tensors[result_id] = tensor
-
-        # Record completion for timing
+        # Record instruction in stream (BEFORE batching logic)
         if self.hotpath_detector:
-            self.hotpath_detector.record_batch_completion(operations)
+            if isinstance(cmd, WorkerBinaryOp):
+                self.hotpath_detector.record_instruction(
+                    'binary', cmd.op, input_count=2
+                )
+            elif isinstance(cmd, WorkerUnaryOp):
+                self.hotpath_detector.record_instruction(
+                    'unary', cmd.op, input_count=1
+                )
+
+        # Now handle the command (with or without batching)
+        if isinstance(cmd, WorkerBinaryOp):
+            return self._handle_binary_op(cmd)
+        elif isinstance(cmd, WorkerUnaryOp):
+            return self._handle_unary_op(cmd)
+        # ...
 
     except Exception as e:
-        print(f"Worker {self.worker_id}: Batch execution failed: {e}")
-        raise
-    finally:
-        self.pending_operations.clear()
+        return WorkerResponse(success=False, error=str(e))
 ```
 
-### 3. Add stats endpoint
+### 3. Reset at sync points
 
 ```python
 # In gt/worker/worker.py
 
-def _handle_get_stats(self, cmd: WorkerGetStats) -> WorkerResponse:
-    """Handle stats request."""
-    stats = {
-        'operations': self.stats['operations'].copy()
-    }
+def _handle_get_data(self, cmd: WorkerGetData) -> WorkerResponse:
+    """Get tensor data - this is a sync point."""
 
-    # Compilation stats from engine
-    if hasattr(self.engine, 'get_compilation_stats'):
-        stats['compilation'] = self.engine.get_compilation_stats()
-
-    # Hot path detection stats
+    # Reset sequence tracking at sync points
     if self.hotpath_detector:
-        stats['hotpath'] = self.hotpath_detector.get_stats()
+        self.hotpath_detector.reset_sequence()
 
-    return WorkerResponse(success=True, data=stats)
+    # ... rest of get_data logic ...
 ```
+
+## Simplifying: Remove Batching?
+
+Since batching is just transport optimization and adds complexity, consider:
+
+**Option 1: Keep simple message batching, stream-based detection**
+```python
+# Batch messages for transport, but detector sees stream
+GT_WORKER_BATCH_SIZE=10  # Reduce network overhead
+GT_AUTO_COMPILE=1         # Stream-based hot path detection
+```
+
+**Option 2: Remove batching entirely (simplest)**
+```python
+# Process one instruction at a time
+# No batching complexity, just stream processing
+GT_AUTO_COMPILE=1  # Pure stream-based detection
+```
+
+The stream-based detector works regardless of batching setting!
 
 ## Environment Variables
 
 ```bash
-# Enable automatic hot path detection and compilation
+# Enable stream-based hot path detection
 GT_AUTO_COMPILE=1 python train.py
 
-# Customize detection threshold (default: 10)
-GT_AUTO_COMPILE=1 GT_HOTPATH_THRESHOLD=20 python train.py
-
-# Combine with message batching
-GT_WORKER_BATCH_SIZE=10 GT_AUTO_COMPILE=1 python train.py
+# Customize detection parameters
+GT_AUTO_COMPILE=1 \
+GT_HOTPATH_WINDOW=20 \
+GT_HOTPATH_THRESHOLD=10 \
+GT_HOTPATH_MIN_SEQ=5 \
+python train.py
 ```
 
-## Behavior
+## How It Works
 
-**Without GT_AUTO_COMPILE:**
-- Worker uses GT_COMPILE setting (manual control)
-- Compile all batches or none
+**Instruction stream:**
+```
+matmul → relu → matmul → relu → matmul → relu → ...
+```
 
-**With GT_AUTO_COMPILE=1:**
-- First 10 iterations: No compilation (fast startup)
-- Iterations 11+: Compilation enabled for detected hot paths
-- Different batch patterns can have different compilation settings
+**After 10 repetitions of "matmul → relu" sequence:**
+```
+[HotPath] Detected hot sequence after 10 reps: Stream(a3f2e8:2ops)
+```
 
-## Benefits
+**Then compilation is enabled for that pattern going forward.**
 
-1. **Zero overhead for short runs** - Scripts with <10 iterations run fast
-2. **Automatic optimization for training** - Long loops get compiled automatically
-3. **Per-pattern compilation** - Only hot paths pay compilation cost
-4. **No manual tuning** - GT_COMPILE flag becomes optional
+## Benefits of Stream-Based Approach
+
+1. **Simpler** - No confusion between transport batching and semantic grouping
+2. **More accurate** - Sees actual instruction sequences as they execute
+3. **Flexible** - Works with or without message batching
+4. **Natural** - Matches how code actually executes (instruction by instruction)
 
 ## Example Output
 
 ```
-Worker worker_0: Hot path detection enabled (threshold=10)
-Worker worker_0: Message batching enabled (batch_size=10)
-[HotPath] Worker detected hot batch after 10 repetitions: Batch(a3f2e8:15ops)
+Worker worker_0: Stream-based hot path detection enabled
+[Processing instruction stream...]
+[HotPath] Detected hot sequence after 10 reps: Stream(a3f2e8:12ops)
+    binary:matmul:in2 → unary:relu:in1 → binary:mul:in2 → ...
 ```
 
 Then in stats:
 ```python
 {
     'hotpath': {
-        'total_batches': 100,
-        'hot_batches_executed': 90,  # Last 90 after threshold
-        'unique_patterns': 1,
-        'hot_paths': 1,
-        'hot_threshold': 10
+        'total_instructions': 1000,
+        'hot_instructions': 900,  # After detection
+        'unique_sequences': 1,
+        'hot_sequences': 1,
+        'hot_threshold': 10,
+        'window_size': 20
     }
 }
 ```
 
-## Testing
+## Next Steps
 
-```bash
-# Test with MLP training
-GT_WORKER_BATCH_SIZE=10 GT_AUTO_COMPILE=1 python examples/train_mlp_gt.py
+1. **Implement stream recording in worker** - Call `record_instruction()` for each op
+2. **Test with training loops** - Verify sequences are detected
+3. **Consider removing batching** - Simplify if not providing real benefit
+4. **Measure impact** - Run benchmarks to see if it improves performance
 
-# Should see:
-# - First 10 epochs fast (no compilation)
-# - "[HotPath] Worker detected..." message
-# - Remaining epochs compiled
-```
+## Discussion: Should We Remove Batching?
 
-## Future Enhancements
+**Arguments for removing:**
+- Adds complexity
+- Minimal benefit (just network overhead reduction)
+- Confuses semantics (transport vs grouping)
+- Stream-based is simpler and clearer
 
-1. **Per-batch compilation override** - Let detector control compilation per-batch rather than globally
-2. **Performance-based disabling** - If compilation makes things slower, revert
-3. **Persistent hot path cache** - Save detected patterns across runs
-4. **Shape-agnostic signatures** - Group patterns by structure, not exact shapes
+**Arguments for keeping:**
+- Does reduce network round-trips
+- Can batch multiple ops into single response
+- Already implemented and tested
+
+**Recommendation:** Start with stream-based detection, measure benefits, then decide on batching.

@@ -1,43 +1,63 @@
 """
 Hot path detection for automatic torch.compile() optimization.
 
-Operates at the worker level, tracking instruction batches as they execute.
-When a batch pattern repeats many times, enables compilation automatically.
+Operates on the INSTRUCTION STREAM - individual operations as they arrive.
+Detects repeated sequences in the stream and enables compilation.
 
-Integration: Workers call record_batch() before executing each batch.
+Key insight: Batching is just transport optimization (message reduction).
+Hot path detection should see the raw instruction stream.
 """
 
-from typing import List, Dict, Optional
-from collections import defaultdict, deque
+from typing import List, Dict, Optional, Tuple
+from collections import deque
 import hashlib
 import time
-import os
 
 
-class BatchSignature:
-    """Signature for an operation batch (for pattern matching)."""
+class InstructionSignature:
+    """Signature for a single instruction."""
 
-    def __init__(self, operations: List):
+    def __init__(self, op_type: str, op_name: str, input_count: int):
         """
-        Create signature from batch of operations.
+        Create signature for an instruction.
 
         Args:
-            operations: List of Operation objects from gt.worker.engine.base
+            op_type: 'binary', 'unary', 'reshape', etc.
+            op_name: 'matmul', 'relu', 'add', etc.
+            input_count: Number of inputs
         """
-        self.hash = self._compute_hash(operations)
-        self.op_count = len(operations)
+        self.op_type = op_type
+        self.op_name = op_name
+        self.input_count = input_count
+        self.hash = f"{op_type}:{op_name}:in{input_count}"
 
-    def _compute_hash(self, operations: List) -> str:
-        """Compute stable hash of operation batch."""
-        # Build signature from operation types and names
-        # Similar to _compute_graph_signature in pytorch.py but simpler
-        sig_parts = []
-        for op in operations:
-            sig_parts.append(f"{op.op_type}:{op.op_name}")
-            # Include input count for structure
-            sig_parts.append(f"in:{len(op.input_ids)}")
+    def __eq__(self, other):
+        return self.hash == other.hash
 
-        sig_str = "|".join(sig_parts)
+    def __hash__(self):
+        return hash(self.hash)
+
+    def __repr__(self):
+        return self.hash
+
+
+class StreamSignature:
+    """Signature for a sequence of instructions (hot path)."""
+
+    def __init__(self, instructions: List[InstructionSignature]):
+        """
+        Create signature from instruction sequence.
+
+        Args:
+            instructions: List of InstructionSignature objects
+        """
+        self.instructions = instructions
+        self.length = len(instructions)
+        self.hash = self._compute_hash()
+
+    def _compute_hash(self) -> str:
+        """Compute hash of instruction sequence."""
+        sig_str = "|".join(str(inst) for inst in self.instructions)
         return hashlib.md5(sig_str.encode()).hexdigest()[:12]
 
     def __eq__(self, other):
@@ -47,132 +67,141 @@ class BatchSignature:
         return hash(self.hash)
 
     def __repr__(self):
-        return f"Batch({self.hash}:{self.op_count}ops)"
+        return f"Stream({self.hash}:{self.length}ops)"
 
 
 class HotPathDetector:
     """
-    Detects repeated batch patterns at the worker level.
+    Detects repeated instruction sequences in the operation stream.
 
-    Tracks operation batches as they execute and automatically enables
-    compilation when patterns repeat frequently.
+    Tracks individual instructions as they arrive (stream-based).
+    Detects when sequences repeat many times.
     """
 
     def __init__(
         self,
+        window_size: int = 20,
         hot_threshold: int = 10,
-        min_ops_per_batch: int = 3,
-        enable_auto_compile: bool = True,
+        min_sequence_length: int = 5,
     ):
         """
-        Initialize hot path detector for a worker.
+        Initialize stream-based hot path detector.
 
         Args:
+            window_size: How many recent instructions to track
             hot_threshold: Number of repetitions before marking as hot
-            min_ops_per_batch: Minimum ops in batch to consider for compilation
-            enable_auto_compile: Whether to automatically enable compilation
+            min_sequence_length: Minimum length of sequence to detect
         """
-        # Read from environment if not explicitly set
-        if hot_threshold == 10:  # default value
-            hot_threshold = int(os.environ.get('GT_HOTPATH_THRESHOLD', '10'))
-
+        self.window_size = window_size
         self.hot_threshold = hot_threshold
-        self.min_ops_per_batch = min_ops_per_batch
-        self.enable_auto_compile = enable_auto_compile
+        self.min_sequence_length = min_sequence_length
 
-        # Pattern tracking
-        self.signature_counts: Dict[BatchSignature, int] = defaultdict(int)
-        self.hot_signatures: set = set()
+        # Instruction stream tracking
+        self.instruction_stream: deque = deque(maxlen=window_size)
 
-        # Performance tracking
-        self.signature_times: Dict[BatchSignature, deque] = defaultdict(
-            lambda: deque(maxlen=10)
-        )
-        self.last_batch_time: Optional[float] = None
+        # Pattern detection
+        self.sequence_counts: Dict[StreamSignature, int] = {}
+        self.hot_sequences: set = set()
+
+        # Current sequence tracking (for matching)
+        self.current_sequence: List[InstructionSignature] = []
+        self.sequence_start_idx = 0
 
         # Statistics
-        self.total_batches = 0
-        self.hot_batches_executed = 0
-        self.unique_patterns = 0
+        self.total_instructions = 0
+        self.hot_instructions_executed = 0
 
-    def record_batch(self, operations: List) -> bool:
+    def record_instruction(
+        self,
+        op_type: str,
+        op_name: str,
+        input_count: int
+    ) -> Tuple[bool, Optional[int]]:
         """
-        Record a batch before execution. Returns whether to compile.
+        Record an instruction in the stream.
 
         Args:
-            operations: List of Operation objects to execute
+            op_type: Type of operation ('binary', 'unary', etc.)
+            op_name: Name of operation ('matmul', 'relu', etc.)
+            input_count: Number of inputs
 
         Returns:
-            True if this batch should be compiled, False otherwise
+            (should_compile, sequence_length) - True if we should compile,
+            and if so, how many upcoming instructions are part of hot sequence
         """
-        self.total_batches += 1
+        self.total_instructions += 1
 
-        # Skip if too few operations
-        if len(operations) < self.min_ops_per_batch:
-            return False
+        # Create instruction signature
+        inst = InstructionSignature(op_type, op_name, input_count)
 
-        # Create signature for this batch
-        signature = BatchSignature(operations)
+        # Add to stream
+        self.instruction_stream.append(inst)
+        self.current_sequence.append(inst)
 
-        # Update counts
-        self.signature_counts[signature] += 1
-        count = self.signature_counts[signature]
+        # Check for repeated sequences
+        if len(self.current_sequence) >= self.min_sequence_length:
+            # Try to match against known patterns
+            seq_sig = StreamSignature(self.current_sequence)
 
-        # Update unique pattern count
-        self.unique_patterns = len(self.signature_counts)
+            # Check if this matches a known sequence
+            if seq_sig in self.sequence_counts:
+                self.sequence_counts[seq_sig] += 1
+                count = self.sequence_counts[seq_sig]
 
-        # Check if this just became a hot path
-        if count == self.hot_threshold and signature not in self.hot_signatures:
-            self.hot_signatures.add(signature)
-            print(f"[HotPath] Worker detected hot batch after {count} repetitions: {signature}")
+                # Mark as hot if threshold reached
+                if count >= self.hot_threshold and seq_sig not in self.hot_sequences:
+                    self.hot_sequences.add(seq_sig)
+                    print(f"[HotPath] Detected hot sequence after {count} reps: {seq_sig}")
 
-        # Track timing
-        self.last_batch_time = time.time()
+                # If this is a hot sequence, signal compilation
+                if seq_sig in self.hot_sequences:
+                    self.hot_instructions_executed += 1
+                    # Return True and remaining length
+                    remaining = seq_sig.length - len(self.current_sequence)
+                    if remaining <= 0:
+                        # Sequence complete, reset
+                        self.current_sequence = []
+                    return True, seq_sig.length
 
-        # Decide whether to compile
-        should_compile = (
-            self.enable_auto_compile
-            and signature in self.hot_signatures
-            and count >= self.hot_threshold
-        )
+            else:
+                # New sequence, record it
+                self.sequence_counts[seq_sig] = 1
 
-        if should_compile:
-            self.hot_batches_executed += 1
+            # Sliding window: if sequence gets too long, slide it
+            if len(self.current_sequence) > self.window_size // 2:
+                # Start new sequence from midpoint
+                self.current_sequence = self.current_sequence[self.min_sequence_length:]
 
-        return should_compile
+        return False, None
 
-    def record_batch_completion(self, operations: List):
-        """Record batch completion time for performance tracking."""
-        if self.last_batch_time is not None:
-            signature = BatchSignature(operations)
-            elapsed = time.time() - self.last_batch_time
-            self.signature_times[signature].append(elapsed)
-            self.last_batch_time = None
+    def reset_sequence(self):
+        """Reset current sequence tracking (call at sync points)."""
+        if self.current_sequence:
+            # Record the sequence we just saw
+            if len(self.current_sequence) >= self.min_sequence_length:
+                seq_sig = StreamSignature(self.current_sequence)
+                if seq_sig not in self.sequence_counts:
+                    self.sequence_counts[seq_sig] = 0
+                self.sequence_counts[seq_sig] += 1
+
+            self.current_sequence = []
 
     def get_stats(self) -> Dict:
         """Get statistics about detected patterns."""
         return {
-            'total_batches': self.total_batches,
-            'hot_batches_executed': self.hot_batches_executed,
-            'unique_patterns': self.unique_patterns,
-            'hot_paths': len(self.hot_signatures),
+            'total_instructions': self.total_instructions,
+            'hot_instructions': self.hot_instructions_executed,
+            'unique_sequences': len(self.sequence_counts),
+            'hot_sequences': len(self.hot_sequences),
             'hot_threshold': self.hot_threshold,
-            'top_patterns': sorted(
-                [(sig, count) for sig, count in self.signature_counts.items()],
+            'window_size': self.window_size,
+            'top_sequences': sorted(
+                [(seq, count) for seq, count in self.sequence_counts.items()],
                 key=lambda x: x[1],
                 reverse=True
-            )[:5],  # Top 5
+            )[:5],
         }
 
     def should_enable_compilation(self) -> bool:
-        """Check if any hot paths have been detected."""
-        return len(self.hot_signatures) > 0
-
-    def reset(self):
-        """Reset all tracking."""
-        self.signature_counts.clear()
-        self.hot_signatures.clear()
-        self.signature_times.clear()
-        self.total_batches = 0
-        self.hot_batches_executed = 0
-        self.unique_patterns = 0
+        """Check if any hot sequences have been detected."""
+        return len(self.hot_sequences) > 0
