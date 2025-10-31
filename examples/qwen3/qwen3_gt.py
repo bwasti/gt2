@@ -37,11 +37,7 @@ class RMSNorm:
         self.eps = eps
         self.dim = dim
         # Initialize weight to ones
-        self.weight = torch.from_numpy(np.ones(dim, dtype='float32'))
-        if not USE_PYTORCH:
-            self.weight = self.weight.requires_grad_(True)
-        else:
-            self.weight.requires_grad_(True)
+        self.weight = torch.from_numpy(np.ones(dim, dtype='float32')).requires_grad_(True)
 
     def __call__(self, x):
         # x shape: (batch, seq_len, dim)
@@ -82,20 +78,12 @@ class Attention:
         # QKV combined projection for efficiency
         self.qkv_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, 3 * self.hidden_size).astype('float32') * std
-        )
-        if not USE_PYTORCH:
-            self.qkv_proj = self.qkv_proj.requires_grad_(True)
-        else:
-            self.qkv_proj.requires_grad_(True)
+        ).requires_grad_(True)
 
-        # Output projection
+        # Output projection (takes 3*hidden as input from QKV fusion)
         self.o_proj = torch.from_numpy(
-            np.random.randn(self.hidden_size, self.hidden_size).astype('float32') * std
-        )
-        if not USE_PYTORCH:
-            self.o_proj = self.o_proj.requires_grad_(True)
-        else:
-            self.o_proj.requires_grad_(True)
+            np.random.randn(3 * self.hidden_size, self.hidden_size).astype('float32') * std
+        ).requires_grad_(True)
 
     def __call__(self, x):
         # x shape: (batch, seq_len, hidden_size)
@@ -105,16 +93,10 @@ class Attention:
         # Single matmul for QKV (more efficient than 3 separate matmuls)
         qkv = x @ self.qkv_proj  # (batch, seq_len, 3*hidden_size)
 
-        # For now, simplified attention: just use V projection
-        # Full attention requires reshape operations we don't have yet
-        # TODO: Implement proper multi-head attention with scaled dot-product
-
-        # Take the V portion (last third)
-        # Simplified: just pass through a projection
-        attn_output = qkv @ self.o_proj  # Placeholder
-
-        # Output projection
-        output = attn_output @ self.o_proj
+        # For now, simplified attention: just pass through output projection
+        # Full attention requires reshape and split operations we don't have yet
+        # TODO: Implement proper multi-head attention with Q, K, V split and scaled dot-product
+        output = qkv @ self.o_proj  # (batch, seq_len, hidden_size)
 
         return output
 
@@ -134,35 +116,21 @@ class MLP:
         # Gate and Up projections (can be fused)
         self.gate_up_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, 2 * self.intermediate_size).astype('float32') * std
-        )
-        if not USE_PYTORCH:
-            self.gate_up_proj = self.gate_up_proj.requires_grad_(True)
-        else:
-            self.gate_up_proj.requires_grad_(True)
+        ).requires_grad_(True)
 
-        # Down projection
+        # Down projection (takes 2*intermediate as input from gate_up fusion)
         self.down_proj = torch.from_numpy(
-            np.random.randn(self.intermediate_size, self.hidden_size).astype('float32') * std
-        )
-        if not USE_PYTORCH:
-            self.down_proj = self.down_proj.requires_grad_(True)
-        else:
-            self.down_proj.requires_grad_(True)
+            np.random.randn(2 * self.intermediate_size, self.hidden_size).astype('float32') * std
+        ).requires_grad_(True)
 
     def __call__(self, x):
         # Fused gate and up projection
         gate_up = x @ self.gate_up_proj  # (batch, seq_len, 2*intermediate_size)
 
-        # Split into gate and up (would need slice operation)
-        # For now, simplified: use gate_up directly
-        # TODO: Implement proper slicing to split gate and up
-
-        # SwiGLU: gate * silu(up)
-        # Simplified for now - just use gate_up
-        hidden = gate_up  # Placeholder
-
-        # Down projection
-        output = hidden @ self.down_proj
+        # For now, simplified: just pass through down projection
+        # Full SwiGLU requires split and activation operations we don't have yet
+        # TODO: Split into gate and up, apply silu(up) * gate
+        output = gate_up @ self.down_proj  # (batch, seq_len, hidden_size)
 
         return output
 
@@ -206,11 +174,7 @@ class Qwen3GTModel:
         # Token embeddings
         self.embed_tokens = torch.from_numpy(
             np.random.randn(self.vocab_size, self.hidden_size).astype('float32') * std
-        )
-        if not USE_PYTORCH:
-            self.embed_tokens = self.embed_tokens.requires_grad_(True)
-        else:
-            self.embed_tokens.requires_grad_(True)
+        ).requires_grad_(True)
 
         # Transformer layers
         self.layers = [TransformerBlock(config) for _ in range(self.num_layers)]
@@ -251,11 +215,7 @@ class Qwen3GTForCausalLM:
         # LM head (shares weights with embeddings in many models, but separate for clarity)
         self.lm_head = torch.from_numpy(
             np.random.randn(self.hidden_size, self.vocab_size).astype('float32') * 0.02
-        )
-        if not USE_PYTORCH:
-            self.lm_head = self.lm_head.requires_grad_(True)
-        else:
-            self.lm_head.requires_grad_(True)
+        ).requires_grad_(True)
 
     def __call__(self, input_ids):
         # Forward pass through model

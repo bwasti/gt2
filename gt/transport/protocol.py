@@ -49,6 +49,16 @@ class UnaryOp(ClientCommand):
 
 
 @dataclass
+class ReshapeOp(ClientCommand):
+    """Reshape operation: result = reshape/unsqueeze/squeeze(input)."""
+    result_id: int
+    op: str  # "reshape", "unsqueeze", "squeeze"
+    input_id: int
+    params: tuple  # reshape: new_shape, unsqueeze: (dim,), squeeze: () or (dim,)
+    signal: Optional[str] = None  # Signal name for sharding config
+
+
+@dataclass
 class GetData(ClientCommand):
     """Request data for a tensor."""
     tensor_id: int

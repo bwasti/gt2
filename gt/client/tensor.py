@@ -124,10 +124,8 @@ class Tensor:
         # Compute the subtraction
         result = self - other
 
-        # Steal result's ID and metadata
+        # Steal result's ID
         new_id = result.id
-        new_shape = result.shape
-        new_dtype = result.dtype
 
         # Detach result's finalizer to prevent it from freeing the tensor we're adopting
         result._finalizer.detach()
@@ -135,8 +133,10 @@ class Tensor:
         # Update this tensor's ID to point to the new result
         # The old tensor will be garbage collected naturally
         self.id = new_id
-        self.shape = new_shape
-        self.dtype = new_dtype
+
+        # IMPORTANT: Do NOT update shape/dtype - these should remain constant!
+        # The result of the subtraction should have the same shape as self.
+        # If it doesn't, that's a bug in the operation, not something we should hide.
 
         return self
 
@@ -190,8 +190,23 @@ class Tensor:
 
     def reshape(self, *shape):
         """Reshape tensor to new shape"""
-        # TODO: implement reshape
-        raise NotImplementedError("reshape not yet implemented")
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = tuple(shape[0])
+        return _reshape_op("reshape", self, shape)
+
+    def view(self, *shape):
+        """View tensor with new shape (alias for reshape, PyTorch-style)"""
+        return self.reshape(*shape)
+
+    def unsqueeze(self, dim):
+        """Add a dimension of size 1 at the specified position"""
+        return _reshape_op("unsqueeze", self, (dim,))
+
+    def squeeze(self, dim=None):
+        """Remove dimensions of size 1"""
+        if dim is None:
+            return _reshape_op("squeeze", self, ())
+        return _reshape_op("squeeze", self, (dim,))
 
     def transpose(self):
         """Transpose tensor (swap last two dimensions)"""
@@ -512,6 +527,96 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
             elif op == "transpose":
                 # grad of transpose: just transpose the gradient back
                 return [grad_output.T]
+            else:
+                raise RuntimeError(f"Gradient not implemented for {op}")
+
+        graph.record(result, [input_tensor], grad_fn)
+
+    return result
+
+
+def _reshape_op(op: str, input_tensor: Tensor, params: tuple) -> Tensor:
+    """Execute a reshape operation (reshape, unsqueeze, squeeze)."""
+    from gt.transport.protocol import ReshapeOp, ClientResponse
+    from gt.client.autograd import get_graph
+    import numpy as np
+
+    if _client_connection is None:
+        raise RuntimeError("Not connected to dispatcher")
+
+    requires_grad = input_tensor.requires_grad
+
+    result = Tensor(requires_grad=requires_grad)
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
+    cmd = ReshapeOp(result_id=result.id, op=op, input_id=input_tensor.id, params=params, signal=signal_name)
+
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
+
+    if not response.success:
+        raise RuntimeError(f"Operation {op} failed: {response.error}")
+
+    # Compute result shape
+    if op == "reshape":
+        result.shape = params
+        result.dtype = input_tensor.dtype
+    elif op == "unsqueeze":
+        dim = params[0]
+        if input_tensor.shape:
+            shape_list = list(input_tensor.shape)
+            # Handle negative dimensions
+            if dim < 0:
+                dim = len(shape_list) + dim + 1
+            shape_list.insert(dim, 1)
+            result.shape = tuple(shape_list)
+        else:
+            result.shape = (1,)
+        result.dtype = input_tensor.dtype
+    elif op == "squeeze":
+        if input_tensor.shape:
+            if len(params) == 0:
+                # Squeeze all dimensions of size 1
+                result.shape = tuple(d for d in input_tensor.shape if d != 1)
+            else:
+                # Squeeze specific dimension
+                dim = params[0]
+                shape_list = list(input_tensor.shape)
+                if shape_list[dim] == 1:
+                    shape_list.pop(dim)
+                result.shape = tuple(shape_list)
+        else:
+            result.shape = ()
+        result.dtype = input_tensor.dtype
+
+    # Record on autograd tape if needed
+    if requires_grad:
+        graph = get_graph()
+
+        # Define gradient function for reshape operations
+        def grad_fn(grad_output):
+            if op == "reshape":
+                # Gradient of reshape: reshape back to original shape
+                return [grad_output.reshape(input_tensor.shape)]
+            elif op == "unsqueeze":
+                # Gradient of unsqueeze: squeeze the added dimension
+                dim = params[0]
+                return [grad_output.squeeze(dim)]
+            elif op == "squeeze":
+                # Gradient of squeeze: unsqueeze back
+                if len(params) == 0:
+                    # Need to unsqueeze all removed dimensions - just reshape
+                    return [grad_output.reshape(input_tensor.shape)]
+                else:
+                    dim = params[0]
+                    return [grad_output.unsqueeze(dim)]
             else:
                 raise RuntimeError(f"Gradient not implemented for {op}")
 

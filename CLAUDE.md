@@ -167,6 +167,16 @@ Defines protocols for communication between components:
 4. **Multiple Clients**: Dispatcher handles concurrent clients.
 5. **Async Streams**: Client input, dispatch stream, and worker execution are all async (enables future optimizations).
 
+**CRITICAL: NEVER AVOID FIXING BUGS IN THE CORE GT**
+
+When encountering bugs in the GT framework:
+- Always fix the bug in the core framework
+- Do NOT create workarounds in example code
+- Do NOT skip functionality because it's "not implemented yet"
+- Investigate and fix the root cause
+
+The goal is to build a robust, production-ready framework. Avoiding bugs only hides problems and prevents progress.
+
 ## Future Considerations
 
 - **Compilation via Batching**: Don't implement now, but multiple async streams will allow "slack" for batching instruction streams. This will enable better use of pytorch/jax backends.
