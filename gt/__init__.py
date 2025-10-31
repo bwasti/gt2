@@ -107,47 +107,20 @@ def _ensure_connected():
         from gt.config import load_config as _load_config
         _load_config(config_file)
 
-    dispatcher = Dispatcher(host='localhost', port=0, log_file=log_file, console_log=False)  # Use port 0 for auto-assign
-    dispatcher.running = True
+    # Choose a port (use 59000 for auto-start to avoid conflicts)
+    actual_port = 59000
 
-    # Create server socket
-    server_sock = create_server('localhost', 0)
-    actual_port = server_sock.getsockname()[1]
+    # Create dispatcher with ZMQ ROUTER
+    dispatcher = Dispatcher(host='localhost', port=actual_port, log_file=log_file, console_log=False)
     t1 = time.time()
-    print(f"GT: Server socket created ({(t1-start_time)*1000:.1f}ms)")
+    print(f"GT: Dispatcher created on port {actual_port} ({(t1-start_time)*1000:.1f}ms)")
 
-    # Event to signal when all workers are connected
-    workers_ready = threading.Event()
-
-    # Start dispatcher in thread
-    def run_dispatcher():
-        # Accept N worker connections
-        for i in range(num_workers):
-            sock, addr = server_sock.accept()
-            conn = Connection(sock)
-            worker_id = f"auto_worker_{i}" if num_workers > 1 else "auto_worker"
-            dispatcher.register_worker(conn, worker_id)
-
-        # Signal that all workers are connected
-        workers_ready.set()
-
-        # Accept client connections
-        while dispatcher.running:
-            try:
-                sock, addr = server_sock.accept()
-                conn = Connection(sock)
-                client_id = f"{addr[0]}:{addr[1]}"
-                thread = threading.Thread(
-                    target=dispatcher._handle_client,
-                    args=(conn, client_id),
-                    daemon=True
-                )
-                thread.start()
-            except:
-                break
-
-    dispatcher_thread = threading.Thread(target=run_dispatcher, daemon=True)
+    # Start dispatcher in background thread
+    dispatcher_thread = threading.Thread(target=dispatcher.start, daemon=True)
     dispatcher_thread.start()
+
+    # Give dispatcher time to bind
+    time.sleep(0.1)
 
     # Start N workers in threads immediately
     t2 = time.time()
@@ -185,17 +158,18 @@ def _ensure_connected():
         worker_thread.start()
         worker_threads.append(worker_thread)
 
-    # Wait for all workers to connect
-    workers_ready.wait()
+    # Give workers time to start and register
+    time.sleep(1.5)
     t3 = time.time()
-    print(f"GT: All workers connected ({(t3-t2)*1000:.1f}ms)")
+    print(f"GT: Workers started ({(t3-t2)*1000:.1f}ms)")
+    print(f"GT: Registered workers: {len(dispatcher.workers)}")
 
     # Connect client
     from gt.client.client import Client
     _client = Client(dispatcher_host='localhost', dispatcher_port=actual_port)
     _client.connect()
     _connected = True
-    _auto_server = (dispatcher, server_sock)
+    _auto_server = dispatcher
 
     t4 = time.time()
     print(f"GT: Ready! Total startup time: {(t4-start_time)*1000:.1f}ms")
@@ -334,10 +308,11 @@ def _cleanup():
         except:
             pass
     if _auto_server:
-        dispatcher, server_sock = _auto_server
+        dispatcher = _auto_server
         dispatcher.running = False
         try:
-            server_sock.close()
+            if hasattr(dispatcher, 'server_socket'):
+                dispatcher.server_socket.close()
         except:
             pass
 

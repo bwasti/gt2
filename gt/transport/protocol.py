@@ -86,6 +86,12 @@ class GetWorkerStats(ClientCommand):
 
 
 @dataclass
+class RegisterWorker(ClientCommand):
+    """Register a worker with the dispatcher."""
+    worker_id: str
+
+
+@dataclass
 class BatchCommands(ClientCommand):
     """Batch multiple operations together for efficient communication.
 

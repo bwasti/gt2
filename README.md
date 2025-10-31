@@ -4,6 +4,7 @@ A distributed multiplexing tensor framework.  Top notch API.
 
 ## Features
 
+- **High-performance transport** - ZeroMQ (ZMQ) with automatic message batching and efficient DEALER/ROUTER pattern
 - **Instruction batching with torch.compile()** - Accumulate operations and compile with PyTorch's JIT
 - **Signal-based sharding** - Configure data/model/pipeline parallelism via YAML
 - **Autograd support** - Tape-based automatic differentiation
@@ -174,6 +175,25 @@ gt.debug.print_worker_stats()
 - **NumPy**: CPU-only reference implementation
 
 Workers use PyTorch when batching is enabled or multiple workers are present.
+
+## High-Performance Transport Layer
+
+GT uses **ZeroMQ (ZMQ)** for client-dispatcher-worker communication:
+
+**Benefits:**
+- **Automatic message batching** - ZMQ queues and batches messages at the transport layer
+- **Higher throughput** - More efficient than raw TCP for high-frequency small messages
+- **Built-in patterns** - DEALER/ROUTER pattern handles multiple connections efficiently
+- **Scalability** - Supports many concurrent clients and workers without manual connection management
+- **IPC optimization** - Uses Unix domain sockets (IPC) for localhost connections, bypassing TCP/IP stack for lower latency
+
+**Architecture:**
+- **Dispatcher** - Single ZMQ ROUTER socket handles all connections
+- **Clients/Workers** - DEALER sockets for async communication
+- **Worker Registration** - Workers send registration message on startup
+- **Transport selection** - Automatically uses IPC (`ipc://`) for localhost, TCP (`tcp://`) for remote hosts
+
+This replaces the previous TCP implementation and provides better performance for the high message rate typical in distributed training workloads.
 
 ## Installation
 
@@ -373,16 +393,17 @@ Note: GT adds communication/serialization overhead. For small operations this ov
 │  │ Config: Loads YAML sharding strategies          │           │
 │  └─────────────────────────────────────────────────┘           │
 └──────────────────────┬──────────────────────────────────────────┘
-                       │ TCP (Protocol with signal metadata)
+                       │ ZMQ (DEALER → ROUTER with signal metadata)
                        │
 ┌──────────────────────▼──────────────────────────────────────────┐
 │                    gt/dispatcher/                                │
+│  • ZMQ ROUTER socket handles all connections                    │
 │  • Reads signal configs from YAML                               │
 │  • Routes operations based on sharding strategy                 │
 │  • Logs instruction stream to file                              │
 │  • Handles multiple clients concurrently                        │
 └───────┬──────────────┬──────────────┬──────────────────────────┘
-        │              │              │ TCP (WorkerProtocol)
+        │              │              │ ZMQ (DEALER ← ROUTER)
         │              │              │
     ┌───▼────┐    ┌───▼────┐    ┌───▼────┐
     │Worker 0│    │Worker 1│    │Worker N│ (1 per GPU)
@@ -399,8 +420,9 @@ Note: GT adds communication/serialization overhead. For small operations this ov
 **Components:**
 
 - **gt/client/** - User-facing API with location-transparent tensors, tape-based autograd, signal tracking, and neural network modules
-- **gt/dispatcher/** - Coordinates clients and schedules operations. Maps client tensors to physical locations, reads signal configs for sharding decisions, and logs instruction streams
-- **gt/worker/** - Executes operations using backends. Supports instruction batching, torch.compile() with caching, and multiple backends (PyTorch/NumPy). One worker per GPU.
+- **gt/dispatcher/** - Coordinates clients and schedules operations using ZMQ ROUTER socket. Maps client tensors to physical locations, reads signal configs for sharding decisions, and logs instruction streams
+- **gt/worker/** - Executes operations using backends. Connects via ZMQ DEALER socket. Supports instruction batching, torch.compile() with caching, and multiple backends (PyTorch/NumPy). One worker per GPU.
+- **gt/transport/** - ZeroMQ-based communication layer with DEALER/ROUTER pattern for high-performance message passing
 - **gt/signal.py** - Signal-based sharding API with context managers, thread-local signal stack, and backward signal support
 - **gt/config.py** - YAML config loading that parses sharding strategies and maps signal names to worker assignments
 

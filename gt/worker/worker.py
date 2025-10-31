@@ -70,8 +70,20 @@ class Worker:
 
     def connect_to_dispatcher(self, dispatcher_host="localhost", dispatcher_port=9000):
         """Connect to dispatcher and start processing."""
+        from gt.transport.protocol import RegisterWorker
+
         self.conn = connect(dispatcher_host, dispatcher_port)
         print(f"Worker {self.worker_id} connected to dispatcher")
+
+        # Register with dispatcher
+        reg_cmd = RegisterWorker(worker_id=self.worker_id)
+        self.conn.send(reg_cmd)
+        reg_response = self.conn.recv()
+        if not reg_response.success:
+            print(f"Worker {self.worker_id} failed to register: {reg_response.error}")
+            return
+
+        print(f"Worker {self.worker_id} registered successfully")
 
         # Process commands
         while True:

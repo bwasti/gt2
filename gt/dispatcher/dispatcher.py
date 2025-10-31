@@ -11,7 +11,7 @@ import time
 from gt.transport.connection import create_server, Connection
 from gt.transport.protocol import (
     ClientCommand, CreateTensor, BinaryOp, UnaryOp, GetData, FreeTensor, CopyTensor,
-    CompileStart, CompileEnd, GetWorkerStats,
+    CompileStart, CompileEnd, GetWorkerStats, RegisterWorker,
     ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
     WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
 )
@@ -68,8 +68,8 @@ Column Details:
             self.file_handle.write(header)
             self.file_handle.flush()
 
-    def log(self, event_type: str, client_id: str, command_type: str, details: str = ""):
-        """Log an operation event."""
+    def log(self, event_type: str, client_id: str, command_type: str, details: str = "", size_bytes: int = 0):
+        """Log an operation event with message size."""
         with self.lock:
             elapsed = time.time() - self.start_time
             self.sequence += 1
@@ -80,7 +80,8 @@ Column Details:
                 "event": event_type,
                 "client": client_id,
                 "command": command_type,
-                "details": details
+                "details": details,
+                "size_bytes": size_bytes
             }
             self.entries.append(entry)
 
@@ -104,6 +105,7 @@ Column Details:
         client = entry["client"]
         command = entry["command"]
         details = entry["details"]
+        size_bytes = entry.get("size_bytes", 0)
 
         # Determine source type
         if "WORKER" in event:
@@ -113,19 +115,36 @@ Column Details:
         else:
             source_type = "CLIENT"
 
+        # Format size nicely
+        if size_bytes == 0:
+            size_str = ""
+        elif size_bytes < 1024:
+            size_str = f"{size_bytes}B"
+        elif size_bytes < 1024 * 1024:
+            size_str = f"{size_bytes / 1024:.1f}KB"
+        else:
+            size_str = f"{size_bytes / (1024 * 1024):.2f}MB"
+
         # Format with nice alignment
-        # Format: "  0.123s | #0042 | RECV         | CLIENT 127.0.0.1:12345 | BinaryOp        | result=42 op=add"
+        # Format: "  0.123s | #0042 | RECV         | CLIENT 127.0.0.1:12345 | BinaryOp        | 123KB | result=42 op=add"
         time_str = f"{elapsed:7.3f}s"
         seq_str = f"#{seq:04d}"
         event_str = f"{event:12s}"
         source_str = f"{source_type} {client:20s}"
         command_str = f"{command:15s}"
 
-        # Build the line
-        if details:
-            line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str} | {details}"
+        # Build the line with size
+        if size_str:
+            size_field = f"{size_str:>10s}"
+            if details:
+                line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str} | {size_field} | {details}"
+            else:
+                line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str} | {size_field}"
         else:
-            line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str}"
+            if details:
+                line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str} | {details}"
+            else:
+                line = f"{time_str} | {seq_str} | {event_str} | {source_str} | {command_str}"
 
         return line
 
@@ -158,38 +177,102 @@ class Dispatcher:
         self.server_socket = None
         self.instruction_stream = InstructionStream(log_file=log_file, console=console_log)  # Record all instructions for debugging/monitoring
 
-    def register_worker(self, worker_conn: Connection, worker_id: str):
-        """Register a worker."""
+    def register_worker(self, worker_identity: bytes, worker_id: str):
+        """Register a worker by its ZMQ identity."""
         self.workers.append({
             "id": worker_id,
-            "conn": worker_conn
+            "identity": worker_identity
         })
         print(f"Worker {worker_id} registered")
 
+    def _send_to_worker(self, worker, cmd):
+        """Send a command to a worker via ROUTER socket."""
+        import zmq
+        from gt.transport.protocol import serialize
+
+        identity = worker["identity"]
+        data = serialize(cmd)
+
+        self.server_socket.send(identity, zmq.SNDMORE)
+        self.server_socket.send(b'', zmq.SNDMORE)
+        self.server_socket.send(data)
+
+        # Return size for logging
+        return len(data)
+
+    def _recv_from_worker(self, worker):
+        """Receive a response from a worker (blocking)."""
+        import zmq
+        from gt.transport.protocol import deserialize
+
+        # In ROUTER mode, we need to receive from the socket and match by identity
+        # This is a simplified version - in production would need proper matching
+        identity = self.server_socket.recv()
+        empty = self.server_socket.recv()
+        data = self.server_socket.recv()
+
+        # Return both response and size
+        return deserialize(data), len(data)
+
     def start(self):
-        """Start the dispatcher server."""
+        """Start the dispatcher server using ZMQ ROUTER."""
+        import zmq
+
         self.running = True
+
+        # Create ZMQ ROUTER socket (uses IPC for localhost, TCP for remote)
         self.server_socket = create_server(self.host, self.port)
-        print(f"Dispatcher listening on {self.host}:{self.port}")
+
+        # Determine endpoint type for logging
+        transport = "IPC" if self.host in ('localhost', '127.0.0.1', '0.0.0.0') else "TCP"
+        print(f"Dispatcher listening on {self.host}:{self.port} ({transport})")
 
         while self.running:
             try:
-                sock, addr = self.server_socket.accept()
-                conn = Connection(sock)
-                print(f"New connection from {addr}")
+                # Receive message: [identity, empty, data]
+                identity = self.server_socket.recv()
+                empty = self.server_socket.recv()
+                data = self.server_socket.recv()
 
-                # For now, assume it's a client connection
-                # In a real system, we'd do a handshake to determine client vs worker
-                client_id = f"{addr[0]}:{addr[1]}"
-                thread = threading.Thread(
-                    target=self._handle_client,
-                    args=(conn, client_id),
-                    daemon=True
-                )
-                thread.start()
+                # Track message size
+                recv_size = len(data)
+
+                # Deserialize command
+                from gt.transport.protocol import deserialize, serialize
+                cmd = deserialize(data)
+
+                # Use identity as client ID
+                client_id = identity.hex()
+
+                # Log received command with size
+                cmd_type = type(cmd).__name__
+                self.instruction_stream.log("RECV", client_id, cmd_type, self._get_cmd_details(cmd), size_bytes=recv_size)
+
+                # Handle worker registration
+                if isinstance(cmd, RegisterWorker):
+                    self.register_worker(identity, cmd.worker_id)
+                    response = ClientResponse(success=True)
+                else:
+                    # Process regular command
+                    response = self._process_command(cmd, client_id)
+
+                # Serialize response
+                response_data = serialize(response)
+                send_size = len(response_data)
+
+                # Send response: [identity, empty, data]
+                self.server_socket.send(identity, zmq.SNDMORE)
+                self.server_socket.send(b'', zmq.SNDMORE)
+                self.server_socket.send(response_data)
+
+                # Log sent response with size
+                self.instruction_stream.log("SEND", client_id, cmd_type, f"success={response.success}", size_bytes=send_size)
+
             except Exception as e:
                 if self.running:
-                    print(f"Error accepting connection: {e}")
+                    print(f"Error processing message: {e}")
+                    import traceback
+                    traceback.print_exc()
 
     def stop(self):
         """Stop the dispatcher."""
@@ -265,10 +348,10 @@ class Dispatcher:
             dtype=cmd.dtype,
             shape=cmd.shape
         )
-        self._log_worker_cmd(worker["id"], "WorkerCreateTensor", f"tensor={worker_tensor_id}")
-        worker["conn"].send(worker_cmd)
-        worker_response: WorkerResponse = worker["conn"].recv()
-        self._log_worker_response(worker["id"], "WorkerCreateTensor", worker_response.success)
+        send_size = self._send_to_worker(worker, worker_cmd)
+        self._log_worker_cmd(worker["id"], "WorkerCreateTensor", f"tensor={worker_tensor_id}", size_bytes=send_size)
+        worker_response, recv_size = self._recv_from_worker(worker)
+        self._log_worker_response(worker["id"], "WorkerCreateTensor", worker_response.success, size_bytes=recv_size)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -324,10 +407,10 @@ class Dispatcher:
             left_id=left_loc.worker_tensor_id,
             right_id=right_loc.worker_tensor_id
         )
-        self._log_worker_cmd(worker["id"], "WorkerBinaryOp", f"op={cmd.op} result={result_tensor_id}")
-        worker["conn"].send(worker_cmd)
-        worker_response: WorkerResponse = worker["conn"].recv()
-        self._log_worker_response(worker["id"], "WorkerBinaryOp", worker_response.success)
+        send_size = self._send_to_worker(worker, worker_cmd)
+        self._log_worker_cmd(worker["id"], "WorkerBinaryOp", f"op={cmd.op} result={result_tensor_id}", size_bytes=send_size)
+        worker_response, recv_size = self._recv_from_worker(worker)
+        self._log_worker_response(worker["id"], "WorkerBinaryOp", worker_response.success, size_bytes=recv_size)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -369,10 +452,10 @@ class Dispatcher:
                 shape=cmd.shape,
                 dtype=cmd.dtype
             )
-            self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} shape={cmd.shape}")
-            worker["conn"].send(worker_cmd)
-            worker_response: WorkerResponse = worker["conn"].recv()
-            self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success)
+            send_size = self._send_to_worker(worker, worker_cmd)
+            self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} shape={cmd.shape}", size_bytes=send_size)
+            worker_response, recv_size = self._recv_from_worker(worker)
+            self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success, size_bytes=recv_size)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=worker_response.error)
@@ -414,10 +497,10 @@ class Dispatcher:
             op=cmd.op,
             input_id=input_loc.worker_tensor_id
         )
-        self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} input={input_loc.worker_tensor_id}")
-        worker["conn"].send(worker_cmd)
-        worker_response: WorkerResponse = worker["conn"].recv()
-        self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success)
+        send_size = self._send_to_worker(worker, worker_cmd)
+        self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} input={input_loc.worker_tensor_id}", size_bytes=send_size)
+        worker_response, recv_size = self._recv_from_worker(worker)
+        self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success, size_bytes=recv_size)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -450,8 +533,8 @@ class Dispatcher:
                     return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
 
                 worker_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
-                worker["conn"].send(worker_cmd)
-                worker_response: WorkerResponse = worker["conn"].recv()
+                self._send_to_worker(worker, worker_cmd)
+                worker_response: WorkerResponse = self._recv_from_worker(worker)
 
                 if not worker_response.success:
                     return ClientResponse(success=False, error=worker_response.error)
@@ -470,10 +553,10 @@ class Dispatcher:
             return ClientResponse(success=False, error="Worker not found")
 
         worker_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
-        self._log_worker_cmd(worker["id"], "WorkerGetData", f"tensor={loc.worker_tensor_id}")
-        worker["conn"].send(worker_cmd)
-        worker_response: WorkerResponse = worker["conn"].recv()
-        self._log_worker_response(worker["id"], "WorkerGetData", worker_response.success)
+        send_size = self._send_to_worker(worker, worker_cmd)
+        self._log_worker_cmd(worker["id"], "WorkerGetData", f"tensor={loc.worker_tensor_id}", size_bytes=send_size)
+        worker_response, recv_size = self._recv_from_worker(worker)
+        self._log_worker_response(worker["id"], "WorkerGetData", worker_response.success, size_bytes=recv_size)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -490,10 +573,10 @@ class Dispatcher:
         if worker:
             worker_cmd = WorkerFreeTensor(tensor_id=loc.worker_tensor_id)
             try:
-                self._log_worker_cmd(worker["id"], "WorkerFreeTensor", f"tensor={loc.worker_tensor_id}")
-                worker["conn"].send(worker_cmd)
-                response = worker["conn"].recv()
-                self._log_worker_response(worker["id"], "WorkerFreeTensor", response.success if response else False)
+                send_size = self._send_to_worker(worker, worker_cmd)
+                self._log_worker_cmd(worker["id"], "WorkerFreeTensor", f"tensor={loc.worker_tensor_id}", size_bytes=send_size)
+                response, recv_size = self._recv_from_worker(worker)
+                self._log_worker_response(worker["id"], "WorkerFreeTensor", response.success if response else False, size_bytes=recv_size)
             except:
                 pass  # Worker might be dead
 
@@ -523,8 +606,8 @@ class Dispatcher:
 
         # Get the source data
         get_cmd = WorkerGetData(tensor_id=src_loc.worker_tensor_id)
-        worker["conn"].send(get_cmd)
-        get_response = worker["conn"].recv()
+        self._send_to_worker(worker, get_cmd)
+        get_response, recv_size = self._recv_from_worker(worker)
 
         if not get_response.success:
             return ClientResponse(success=False, error=f"Failed to get source data: {get_response.error}")
@@ -536,8 +619,8 @@ class Dispatcher:
             dtype=dest_loc.dtype,
             shape=get_response.data.shape
         )
-        worker["conn"].send(create_cmd)
-        create_response = worker["conn"].recv()
+        self._send_to_worker(worker, create_cmd)
+        create_response, recv_size = self._recv_from_worker(worker)
 
         if not create_response.success:
             return ClientResponse(success=False, error=f"Failed to copy data: {create_response.error}")
@@ -580,8 +663,8 @@ class Dispatcher:
 
             # Fetch B data
             get_cmd = WorkerGetData(tensor_id=right_loc.worker_tensor_id)
-            right_worker["conn"].send(get_cmd)
-            right_response: WorkerResponse = right_worker["conn"].recv()
+            right_self._send_to_worker(worker, get_cmd)
+            right_response: WorkerResponse = right_self._recv_from_worker(worker)
             if not right_response.success:
                 return ClientResponse(success=False, error="Failed to get B data")
 
@@ -592,8 +675,8 @@ class Dispatcher:
                 dtype=right_loc.dtype,
                 shape=right_loc.shape
             )
-            worker["conn"].send(create_b_cmd)
-            create_response: WorkerResponse = worker["conn"].recv()
+            self._send_to_worker(worker, create_b_cmd)
+            create_response: WorkerResponse = self._recv_from_worker(worker)
             if not create_response.success:
                 return ClientResponse(success=False, error="Failed to create B copy")
 
@@ -606,8 +689,8 @@ class Dispatcher:
                 left_id=left_loc.worker_tensor_id,
                 right_id=b_copy_id
             )
-            worker["conn"].send(matmul_cmd)
-            matmul_response: WorkerResponse = worker["conn"].recv()
+            self._send_to_worker(worker, matmul_cmd)
+            matmul_response: WorkerResponse = self._recv_from_worker(worker)
 
             if not matmul_response.success:
                 return ClientResponse(success=False, error=f"Matmul failed on worker {left_loc.worker_id}")
@@ -660,8 +743,8 @@ class Dispatcher:
                 op=cmd.op,  # sum or mean
                 input_id=loc.worker_tensor_id
             )
-            worker["conn"].send(worker_cmd)
-            worker_response: WorkerResponse = worker["conn"].recv()
+            self._send_to_worker(worker, worker_cmd)
+            worker_response: WorkerResponse = self._recv_from_worker(worker)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=worker_response.error)
@@ -669,8 +752,8 @@ class Dispatcher:
             # Now get the data from the computed result
             from gt.transport.protocol import WorkerGetData
             get_cmd = WorkerGetData(tensor_id=result_tensor_id)
-            worker["conn"].send(get_cmd)
-            get_response: WorkerResponse = worker["conn"].recv()
+            self._send_to_worker(worker, get_cmd)
+            get_response: WorkerResponse = self._recv_from_worker(worker)
 
             if not get_response.success:
                 return ClientResponse(success=False, error=get_response.error)
@@ -708,8 +791,8 @@ class Dispatcher:
             dtype=input_locs[0].dtype,
             shape=result_data.shape
         )
-        first_worker["conn"].send(create_cmd)
-        worker_response: WorkerResponse = first_worker["conn"].recv()
+        first_self._send_to_worker(worker, create_cmd)
+        worker_response: WorkerResponse = first_self._recv_from_worker(worker)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -754,8 +837,8 @@ class Dispatcher:
                 shape=tuple(shard_shape),
                 dtype=cmd.dtype
             )
-            worker["conn"].send(worker_cmd)
-            worker_response: WorkerResponse = worker["conn"].recv()
+            self._send_to_worker(worker, worker_cmd)
+            worker_response: WorkerResponse = self._recv_from_worker(worker)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=worker_response.error)
@@ -806,10 +889,10 @@ class Dispatcher:
 
         for worker in self.workers:
             worker_cmd = WorkerCompileStart(signal_name=cmd.signal_name)
-            self._log_worker_cmd(worker["id"], "WorkerCompileStart", f"signal={cmd.signal_name}")
-            worker["conn"].send(worker_cmd)
-            worker_response: WorkerResponse = worker["conn"].recv()
-            self._log_worker_response(worker["id"], "WorkerCompileStart", worker_response.success)
+            send_size = self._send_to_worker(worker, worker_cmd)
+            self._log_worker_cmd(worker["id"], "WorkerCompileStart", f"signal={cmd.signal_name}", size_bytes=send_size)
+            worker_response, recv_size = self._recv_from_worker(worker)
+            self._log_worker_response(worker["id"], "WorkerCompileStart", worker_response.success, size_bytes=recv_size)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=f"Worker {worker['id']} failed: {worker_response.error}")
@@ -828,10 +911,10 @@ class Dispatcher:
 
         for worker in self.workers:
             worker_cmd = WorkerCompileEnd(signal_name=cmd.signal_name)
-            self._log_worker_cmd(worker["id"], "WorkerCompileEnd", f"signal={cmd.signal_name}")
-            worker["conn"].send(worker_cmd)
-            worker_response: WorkerResponse = worker["conn"].recv()
-            self._log_worker_response(worker["id"], "WorkerCompileEnd", worker_response.success)
+            send_size = self._send_to_worker(worker, worker_cmd)
+            self._log_worker_cmd(worker["id"], "WorkerCompileEnd", f"signal={cmd.signal_name}", size_bytes=send_size)
+            worker_response, recv_size = self._recv_from_worker(worker)
+            self._log_worker_response(worker["id"], "WorkerCompileEnd", worker_response.success, size_bytes=recv_size)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=f"Worker {worker['id']} failed: {worker_response.error}")
@@ -844,10 +927,10 @@ class Dispatcher:
 
         for worker in self.workers:
             worker_cmd = WorkerGetStats()
-            self._log_worker_cmd(worker["id"], "WorkerGetStats", "")
-            worker["conn"].send(worker_cmd)
-            worker_response: WorkerResponse = worker["conn"].recv()
-            self._log_worker_response(worker["id"], "WorkerGetStats", worker_response.success)
+            send_size = self._send_to_worker(worker, worker_cmd)
+            self._log_worker_cmd(worker["id"], "WorkerGetStats", "", size_bytes=send_size)
+            worker_response, recv_size = self._recv_from_worker(worker)
+            self._log_worker_response(worker["id"], "WorkerGetStats", worker_response.success, size_bytes=recv_size)
 
             if worker_response.success:
                 all_stats[worker["id"]] = worker_response.data
@@ -880,10 +963,10 @@ class Dispatcher:
             return ""
         return ""
 
-    def _log_worker_cmd(self, worker_id: str, cmd_type: str, details: str = ""):
+    def _log_worker_cmd(self, worker_id: str, cmd_type: str, details: str = "", size_bytes: int = 0):
         """Log a command being sent to a worker."""
-        self.instruction_stream.log("WORKER_SEND", worker_id, cmd_type, details)
+        self.instruction_stream.log("WORKER_SEND", worker_id, cmd_type, details, size_bytes=size_bytes)
 
-    def _log_worker_response(self, worker_id: str, cmd_type: str, success: bool):
+    def _log_worker_response(self, worker_id: str, cmd_type: str, success: bool, size_bytes: int = 0):
         """Log a response received from a worker."""
-        self.instruction_stream.log("WORKER_RECV", worker_id, cmd_type, f"success={success}")
+        self.instruction_stream.log("WORKER_RECV", worker_id, cmd_type, f"success={success}", size_bytes=size_bytes)

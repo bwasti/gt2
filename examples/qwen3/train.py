@@ -19,6 +19,8 @@ def parse_args():
                         help='Use real PyTorch instead of GT (for benchmarking)')
     parser.add_argument('--batch-size', type=int, default=2,
                         help='Batch size for training (default: 2)')
+    parser.add_argument('--num-samples', type=int, default=None,
+                        help='Number of training samples to use (default: all available)')
     parser.add_argument('--lr', type=float, default=1e-5,
                         help='Learning rate (default: 1e-5)')
     parser.add_argument('--epochs', type=int, default=3,
@@ -179,11 +181,14 @@ def main():
 
     # Configuration from args
     batch_size = args.batch_size
+    num_samples = args.num_samples
     learning_rate = args.lr
     num_epochs = args.epochs
     data_dir = "examples/qwen3/data"
 
     print(f"Config: batch_size={batch_size}, lr={learning_rate}, epochs={num_epochs}")
+    if num_samples:
+        print(f"        num_samples={num_samples} (limiting dataset size)")
 
     # Check if data exists, if not, prepare it
     input_ids_path = f"{data_dir}/input_ids.npy"
@@ -191,13 +196,22 @@ def main():
         print(f"\nData not found at {data_dir}")
         print("Preparing synthetic training data...")
         from prepare_data import prepare_synthetic_data
-        prepare_synthetic_data(model_size)
+        # Use num_samples if specified, otherwise default to 100
+        prepare_num_samples = num_samples if num_samples else 100
+        prepare_synthetic_data(model_size, num_samples=prepare_num_samples)
         print("Data preparation complete!")
 
     # Load data
     print(f"\nLoading data from {data_dir}...")
     input_ids = np.load(f"{data_dir}/input_ids.npy")
     labels = np.load(f"{data_dir}/labels.npy")
+
+    # Limit to num_samples if specified
+    if num_samples is not None and num_samples < len(input_ids):
+        input_ids = input_ids[:num_samples]
+        labels = labels[:num_samples]
+        print(f"  Limited to {num_samples} examples")
+
     print(f"  Loaded {len(input_ids)} examples")
     print(f"  Input shape: {input_ids.shape}")
 

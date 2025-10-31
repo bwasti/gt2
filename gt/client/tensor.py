@@ -17,13 +17,6 @@ _next_tensor_id = 0
 _connection_lock = threading.Lock()  # Ensure serial command/response flow
 _free_queue = deque()  # Queue of tensor IDs to free (appended from GC, processed in lock)
 
-# TODO: Client-side operation batching (GT_CLIENT_BATCH_SIZE)
-# This would buffer operations at the client before sending to dispatcher
-# Requires careful handling of:
-#  - Sync points (.item(), .data, .backward()) that force flush
-#  - Mapping batch responses back to tensors
-#  - Thread safety for buffered operations
-
 
 class TensorData:
     """Wrapper for tensor data that provides a .numpy() method."""
@@ -77,6 +70,8 @@ class Tensor:
         the data from wherever it lives.
 
         Returns a TensorData wrapper that has a .numpy() method.
+
+        NOTE: This is a sync point - flushes any pending batched operations.
         """
         from gt.transport.protocol import GetData, ClientResponse
 
@@ -208,7 +203,12 @@ class Tensor:
         return self.transpose()
 
     def item(self):
-        """Get scalar value (for 0-d or 1-element tensors)."""
+        """
+        Get scalar value (for 0-d or 1-element tensors).
+
+        NOTE: This is a sync point - flushes any pending batched operations.
+        """
+        # SYNC POINT: .data property already flushes
         data = self.data.numpy()
         if data.size != 1:
             raise ValueError(f"item() only works on tensors with 1 element, got {data.size}")
@@ -238,6 +238,8 @@ class Tensor:
         Compute gradients using autograd.
 
         Like PyTorch: loss.backward()
+
+        NOTE: This is a sync point - flushes any pending batched operations.
         """
         from gt.client.autograd import get_graph
         graph = get_graph()
@@ -285,6 +287,7 @@ def _binary_op(op: str, left, right) -> Tensor:
     signal_name = current_signal()
 
     cmd = BinaryOp(result_id=result.id, op=op, left_id=left.id, right_id=right.id, signal=signal_name)
+
     with _connection_lock:
         # Process any pending frees first
         _process_free_queue()
@@ -425,6 +428,7 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
     signal_name = current_signal()
 
     cmd = UnaryOp(result_id=result.id, op=op, input_id=input_tensor.id, signal=signal_name)
+
     with _connection_lock:
         # Process any pending frees first
         _process_free_queue()
@@ -544,7 +548,12 @@ def _process_free_queue():
 # Factory functions for creating tensors
 
 def from_numpy(array: np.ndarray, requires_grad: bool = False) -> Tensor:
-    """Create a tensor from a numpy array."""
+    """
+    Create a tensor from a numpy array.
+
+    NOTE: This is a sync point - flushes any pending batched operations.
+    CreateTensor must execute immediately since subsequent ops may reference it.
+    """
     from gt.transport.protocol import CreateTensor, ClientResponse
 
     if _client_connection is None:

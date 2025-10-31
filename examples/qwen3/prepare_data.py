@@ -142,16 +142,17 @@ def create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000):
     return tokenized_examples
 
 
-def prepare_synthetic_data(model_size='tiny'):
+def prepare_synthetic_data(model_size='tiny', num_samples=100):
     """
     Prepare synthetic data for training (reusable function).
 
     Args:
         model_size: Model size ('tiny' or '1.7B')
+        num_samples: Number of training samples to generate
     """
     if model_size == 'tiny':
         # Create synthetic data for testing
-        tokenized = create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000)
+        tokenized = create_synthetic_data(num_samples=num_samples, seq_length=128, vocab_size=1000)
         save_dataset(tokenized)
     else:
         raise ValueError(f"prepare_synthetic_data only supports 'tiny' model, got '{model_size}'")

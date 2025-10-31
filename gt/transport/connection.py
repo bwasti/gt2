@@ -1,75 +1,118 @@
 """
-Simple TCP connection helpers.
+ZMQ-based connection helpers for high-performance messaging.
+
+ZMQ provides:
+- Automatic message batching and queueing
+- Higher throughput than raw TCP
+- Built-in reconnection handling
+- Multiple messaging patterns (DEALER/ROUTER, REQ/REP, PUSH/PULL, etc.)
+- IPC transport for localhost (Unix domain sockets - bypasses TCP/IP stack)
+
+Performance optimization:
+- localhost connections use ipc:// (Unix domain sockets)
+- Remote connections use tcp://
+- IPC provides ~30-50% lower latency than TCP for local communication
 
 Keep this SIMPLE and READABLE.
 """
 
-import socket
-import struct
+import zmq
 from .protocol import serialize, deserialize
 
 
 class Connection:
-    """Simple TCP connection wrapper with optimizations."""
+    """ZMQ connection wrapper for client-dispatcher or dispatcher-worker communication."""
 
-    def __init__(self, sock):
-        self.sock = sock
-        # Enable TCP_NODELAY for lower latency (disable Nagle's algorithm)
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        # Increase socket buffer sizes
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)  # 1MB
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)  # 1MB
+    def __init__(self, socket):
+        self.socket = socket
+
+        # Performance optimizations for low-latency, high-throughput
+        # These apply to both IPC and TCP
+
+        # Send immediately without waiting for more messages
+        # (Similar to TCP_NODELAY, but for ZMQ's internal batching)
+        self.socket.setsockopt(zmq.IMMEDIATE, 1)
+
+        # Increase high water marks for better throughput
+        # (Allow more messages to queue before blocking)
+        self.socket.setsockopt(zmq.SNDHWM, 10000)  # Send high water mark
+        self.socket.setsockopt(zmq.RCVHWM, 10000)  # Receive high water mark
+
+        # Set linger to 0 for faster shutdown (don't wait for unsent messages)
+        self.socket.setsockopt(zmq.LINGER, 0)
+
+        # Increase kernel socket buffer sizes (helps with burst traffic)
+        self.socket.setsockopt(zmq.SNDBUF, 1048576)  # 1MB send buffer
+        self.socket.setsockopt(zmq.RCVBUF, 1048576)  # 1MB receive buffer
 
     def send(self, obj):
-        """Send an object over the connection."""
+        """Send an object over the connection.
+
+        DEALER sockets send: [empty, data]
+        """
         data = serialize(obj)
-        # Send length prefix (4 bytes) then data
-        length = len(data)
-        self.sock.sendall(struct.pack('!I', length))
-        self.sock.sendall(data)
+        self.socket.send(b'', zmq.SNDMORE)
+        self.socket.send(data)
 
     def recv(self):
-        """Receive an object from the connection."""
-        # Read length prefix
-        length_data = self._recv_exactly(4)
-        length = struct.unpack('!I', length_data)[0]
+        """Receive an object from the connection.
 
-        # Read data
-        data = self._recv_exactly(length)
+        DEALER sockets receive: [empty, data]
+        """
+        empty = self.socket.recv()  # Empty delimiter
+        data = self.socket.recv()
         return deserialize(data)
-
-    def _recv_exactly(self, n):
-        """Receive exactly n bytes (optimized)."""
-        # Use a larger buffer to reduce number of recv() calls
-        data = bytearray(n)
-        view = memoryview(data)
-        pos = 0
-
-        while pos < n:
-            # Request remaining bytes, socket will return what's available
-            nread = self.sock.recv_into(view[pos:])
-            if nread == 0:
-                raise ConnectionError("Connection closed")
-            pos += nread
-
-        return bytes(data)
 
     def close(self):
         """Close the connection."""
-        self.sock.close()
+        self.socket.close()
 
 
 def create_server(host, port):
-    """Create a TCP server socket."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((host, port))
-    sock.listen(10)
-    return sock
+    """Create a ZMQ ROUTER server socket.
+
+    For localhost, uses IPC (Unix domain sockets) for lower latency.
+    For remote hosts, uses TCP.
+    """
+    context = zmq.Context()
+    socket = context.socket(zmq.ROUTER)
+
+    # Performance optimizations
+    socket.setsockopt(zmq.IMMEDIATE, 1)      # No message queueing to disconnected peers
+    socket.setsockopt(zmq.SNDHWM, 10000)     # High water mark for send queue
+    socket.setsockopt(zmq.RCVHWM, 10000)     # High water mark for receive queue
+    socket.setsockopt(zmq.LINGER, 0)         # Don't wait for unsent messages on close
+    socket.setsockopt(zmq.SNDBUF, 1048576)   # 1MB send buffer
+    socket.setsockopt(zmq.RCVBUF, 1048576)   # 1MB receive buffer
+
+    # Optimization: Use IPC for localhost connections
+    if host in ('localhost', '127.0.0.1', '0.0.0.0'):
+        # IPC (Unix domain socket) - faster than TCP for local communication
+        endpoint = f"ipc:///tmp/gt_dispatcher_{port}.ipc"
+        socket.bind(endpoint)
+    else:
+        # TCP for remote connections
+        socket.bind(f"tcp://{host}:{port}")
+
+    return socket
 
 
 def connect(host, port):
-    """Connect to a TCP server."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((host, port))
-    return Connection(sock)
+    """Connect to a ZMQ ROUTER server using DEALER socket.
+
+    For localhost, uses IPC (Unix domain sockets) for lower latency.
+    For remote hosts, uses TCP.
+    """
+    context = zmq.Context()
+    socket = context.socket(zmq.DEALER)
+
+    # Optimization: Use IPC for localhost connections
+    if host in ('localhost', '127.0.0.1'):
+        # IPC (Unix domain socket) - faster than TCP for local communication
+        endpoint = f"ipc:///tmp/gt_dispatcher_{port}.ipc"
+        socket.connect(endpoint)
+    else:
+        # TCP for remote connections
+        socket.connect(f"tcp://{host}:{port}")
+
+    return Connection(socket)
