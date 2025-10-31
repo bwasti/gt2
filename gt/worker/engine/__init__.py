@@ -10,13 +10,13 @@ from .numpy import NumpyEngine
 from .pytorch import PyTorchEngine
 
 
-def create_engine(backend: str = 'numpy', enable_compilation: bool = True) -> Engine:
+def create_engine(backend: str = 'numpy', enable_compilation: bool = False) -> Engine:
     """
     Factory function to create an engine.
 
     Args:
         backend: 'numpy' or 'pytorch'
-        enable_compilation: Enable torch.compile() for PyTorch (default: True)
+        enable_compilation: Enable torch.compile() for PyTorch (default: False)
 
     Returns:
         Engine instance

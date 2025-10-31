@@ -231,6 +231,13 @@ class Worker:
         left = self.tensors[cmd.left_id]
         right = self.tensors[cmd.right_id]
 
+        # DEBUG: Print shapes for matmul operations
+        import os
+        if os.environ.get('DEBUG_WORKER_SHAPES') and cmd.op == "matmul":
+            left_shape = left.shape if hasattr(left, 'shape') else len(left)
+            right_shape = right.shape if hasattr(right, 'shape') else len(right)
+            print(f"[Worker] matmul: left={cmd.left_id} shape={left_shape}, right={cmd.right_id} shape={right_shape}")
+
         # Execute operation using engine
         if cmd.op == "add":
             result = self.engine.add(left, right)

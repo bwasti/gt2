@@ -14,7 +14,7 @@ from .base import Engine, Operation
 class PyTorchEngine(Engine):
     """PyTorch-based engine (GPU support, compilation, distributed primitives)."""
 
-    def __init__(self, enable_compilation: bool = True):
+    def __init__(self, enable_compilation: bool = False):
         try:
             import torch
             import torch.distributed as dist

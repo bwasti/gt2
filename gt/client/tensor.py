@@ -340,73 +340,68 @@ def _binary_op(op: str, left, right) -> Tensor:
     if requires_grad:
         graph = get_graph()
 
+        # Helper function to reduce gradients when broadcasting occurred
+        def reduce_grad_for_broadcast(grad, original_shape):
+            """Reduce gradient to match original shape after broadcasting."""
+            import numpy as np
+
+            if original_shape == grad.shape:
+                return grad
+
+            # Sum across dimensions that were broadcasted
+            axes_to_sum = []
+            grad_shape = list(grad.shape)
+            orig_shape = list(original_shape) if original_shape else []
+
+            # Pad orig_shape with 1s on the left
+            while len(orig_shape) < len(grad_shape):
+                orig_shape.insert(0, 1)
+                axes_to_sum.append(0)
+
+            # Find dimensions where original was size 1 but grad is larger
+            for i in range(len(grad_shape)):
+                if orig_shape[i] == 1 and grad_shape[i] > 1:
+                    axes_to_sum.append(i)
+
+            if axes_to_sum:
+                # Sum and reshape
+                grad_data = grad.data.numpy()
+                for axis in sorted(axes_to_sum, reverse=True):
+                    grad_data = grad_data.sum(axis=axis, keepdims=True)
+                # Remove dimensions that were added
+                grad_data = grad_data.reshape(original_shape)
+                return from_numpy(grad_data)
+
+            return grad
+
         # Define gradient function for this operation
         def grad_fn(grad_output):
             import numpy as np
 
             if op == "add":
                 # For broadcasting, we need to sum grad_output to match input shapes
-                grad_left = grad_output
-                grad_right = grad_output
-
-                # If left was broadcasted (smaller shape), sum grad across those dims
-                if left.shape != grad_output.shape:
-                    # Sum across dimensions that were broadcasted
-                    axes_to_sum = []
-                    grad_shape = list(grad_output.shape)
-                    left_shape = list(left.shape) if left.shape else []
-
-                    # Pad left_shape with 1s on the left
-                    while len(left_shape) < len(grad_shape):
-                        left_shape.insert(0, 1)
-                        axes_to_sum.append(0)
-
-                    # Find dimensions where left was size 1 but grad is larger
-                    for i in range(len(grad_shape)):
-                        if left_shape[i] == 1 and grad_shape[i] > 1:
-                            axes_to_sum.append(i)
-
-                    if axes_to_sum:
-                        # Sum and reshape
-                        grad_data = grad_output.data.numpy()
-                        for axis in sorted(axes_to_sum, reverse=True):
-                            grad_data = grad_data.sum(axis=axis, keepdims=True)
-                        # Remove dimensions that were added
-                        grad_data = grad_data.reshape(left.shape)
-                        grad_left = from_numpy(grad_data)
-
-                # Same for right
-                if right.shape != grad_output.shape:
-                    axes_to_sum = []
-                    grad_shape = list(grad_output.shape)
-                    right_shape = list(right.shape) if right.shape else []
-
-                    while len(right_shape) < len(grad_shape):
-                        right_shape.insert(0, 1)
-                        axes_to_sum.append(0)
-
-                    for i in range(len(grad_shape)):
-                        if right_shape[i] == 1 and grad_shape[i] > 1:
-                            axes_to_sum.append(i)
-
-                    if axes_to_sum:
-                        grad_data = grad_output.data.numpy()
-                        for axis in sorted(axes_to_sum, reverse=True):
-                            grad_data = grad_data.sum(axis=axis, keepdims=True)
-                        grad_data = grad_data.reshape(right.shape)
-                        grad_right = from_numpy(grad_data)
-
+                grad_left = reduce_grad_for_broadcast(grad_output, left.shape)
+                grad_right = reduce_grad_for_broadcast(grad_output, right.shape)
                 return [grad_left, grad_right]
             elif op == "sub":
                 # d/dleft (left - right) = grad_output
                 # d/dright (left - right) = -grad_output
-                # Create -1 * grad_output
                 neg_one = from_numpy(np.array(-1.0, dtype='float32'))
-                return [grad_output, neg_one * grad_output]
+                grad_left = reduce_grad_for_broadcast(grad_output, left.shape)
+                grad_right = reduce_grad_for_broadcast(neg_one * grad_output, right.shape)
+                return [grad_left, grad_right]
             elif op == "mul":
-                return [grad_output * right, grad_output * left]
+                # d/dleft (left * right) = grad_output * right
+                # d/dright (left * right) = grad_output * left
+                grad_left = reduce_grad_for_broadcast(grad_output * right, left.shape)
+                grad_right = reduce_grad_for_broadcast(grad_output * left, right.shape)
+                return [grad_left, grad_right]
             elif op == "div":
-                return [grad_output / right, -grad_output * left / (right * right)]
+                # d/dleft (left / right) = grad_output / right
+                # d/dright (left / right) = -grad_output * left / right^2
+                grad_left = reduce_grad_for_broadcast(grad_output / right, left.shape)
+                grad_right = reduce_grad_for_broadcast(-grad_output * left / (right * right), right.shape)
+                return [grad_left, grad_right]
             elif op == "matmul":
                 # For matmul: C = A @ B
                 # grad_A = grad_C @ B.T
