@@ -32,3 +32,4 @@ Thumbs.db
 
 # Generated data
 examples/qwen3/data/
+**/examples/qwen3/data/
