@@ -142,20 +142,101 @@ def create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000):
     return tokenized_examples
 
 
+def prepare_tinystories_dataset(num_samples=1000, seq_length=256):
+    """
+    Download and prepare TinyStories dataset.
+
+    TinyStories is a dataset of simple stories written in a simplified vocabulary,
+    designed for training small language models.
+
+    Args:
+        num_samples: Number of samples to use
+        seq_length: Maximum sequence length
+    """
+    print(f"Downloading TinyStories dataset...")
+    print(f"  num_samples: {num_samples}")
+    print(f"  seq_length: {seq_length}")
+
+    try:
+        from datasets import load_dataset
+        from transformers import GPT2Tokenizer
+
+        # Download TinyStories dataset
+        dataset = load_dataset("roneneldan/TinyStories", split="train", streaming=True)
+
+        # Load GPT-2 tokenizer (50257 vocab size)
+        tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        tokenizer.pad_token = tokenizer.eos_token
+
+        # Process samples
+        input_ids_list = []
+        labels_list = []
+
+        print("Tokenizing stories...")
+        for i, example in enumerate(dataset):
+            if i >= num_samples:
+                break
+
+            text = example['text']
+
+            # Tokenize
+            encoded = tokenizer(
+                text,
+                max_length=seq_length,
+                truncation=True,
+                padding='max_length',
+                return_tensors='np'
+            )
+
+            input_ids = encoded['input_ids'][0]
+            # For causal LM, labels are the same as input_ids (shifted during loss computation)
+            labels = input_ids.copy()
+
+            input_ids_list.append(input_ids)
+            labels_list.append(labels)
+
+            if (i + 1) % 100 == 0:
+                print(f"  Processed {i + 1}/{num_samples} stories")
+
+        # Convert to numpy arrays
+        input_ids_array = np.stack(input_ids_list)
+        labels_array = np.stack(labels_list)
+
+        print(f"Dataset prepared: {input_ids_array.shape}")
+
+        # Save
+        tokenized = {
+            'input_ids': input_ids_array,
+            'labels': labels_array
+        }
+        save_dataset(tokenized)
+
+        return tokenized
+
+    except ImportError as e:
+        print(f"Error: Missing dependencies for real dataset: {e}")
+        print("Install with: pip install datasets transformers")
+        print("Falling back to synthetic data...")
+        return create_synthetic_data(num_samples=num_samples, seq_length=seq_length, vocab_size=50257)
+
+
 def prepare_synthetic_data(model_size='tiny', num_samples=100):
     """
     Prepare synthetic data for training (reusable function).
 
     Args:
-        model_size: Model size ('tiny' or '1.7B')
+        model_size: Model size ('tiny', 'nano', 'small', etc.)
         num_samples: Number of training samples to generate
     """
     if model_size == 'tiny':
         # Create synthetic data for testing
         tokenized = create_synthetic_data(num_samples=num_samples, seq_length=128, vocab_size=1000)
         save_dataset(tokenized)
+    elif model_size in ('nano', 'small', 'medium'):
+        # Use TinyStories for realistic models
+        tokenized = prepare_tinystories_dataset(num_samples=num_samples, seq_length=256)
     else:
-        raise ValueError(f"prepare_synthetic_data only supports 'tiny' model, got '{model_size}'")
+        raise ValueError(f"prepare_synthetic_data doesn't support model_size='{model_size}'")
 
 
 def main():
