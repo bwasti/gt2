@@ -17,6 +17,13 @@ _next_tensor_id = 0
 _connection_lock = threading.Lock()  # Ensure serial command/response flow
 _free_queue = deque()  # Queue of tensor IDs to free (appended from GC, processed in lock)
 
+# TODO: Client-side operation batching (GT_CLIENT_BATCH_SIZE)
+# This would buffer operations at the client before sending to dispatcher
+# Requires careful handling of:
+#  - Sync points (.item(), .data, .backward()) that force flush
+#  - Mapping batch responses back to tensors
+#  - Thread safety for buffered operations
+
 
 class TensorData:
     """Wrapper for tensor data that provides a .numpy() method."""

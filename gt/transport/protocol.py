@@ -86,10 +86,28 @@ class GetWorkerStats(ClientCommand):
 
 
 @dataclass
+class BatchCommands(ClientCommand):
+    """Batch multiple operations together for efficient communication.
+
+    This reduces network overhead by sending multiple ops in one message.
+    Operations are executed in order, and all must succeed or the batch fails.
+    """
+    commands: list  # List of ClientCommand objects (BinaryOp, UnaryOp, etc.)
+
+
+@dataclass
 class ClientResponse:
     """Response from dispatcher to client."""
     success: bool
     data: Any = None  # For GetData responses
+    error: Optional[str] = None
+
+
+@dataclass
+class BatchResponses:
+    """Response for a batch of commands."""
+    success: bool
+    responses: list = None  # List of ClientResponse objects
     error: Optional[str] = None
 
 

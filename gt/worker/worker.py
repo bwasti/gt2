@@ -36,6 +36,11 @@ class Worker:
             batch_size = int(os.environ.get('GT_WORKER_BATCH_SIZE', '1'))
         self.batch_size = batch_size
 
+        # Compilation configuration (separate from message batching)
+        # GT_COMPILE enables torch.compile() on batched operations
+        # Default to False since compilation has dependency tracking issues
+        enable_compilation = os.environ.get('GT_COMPILE', '0') == '1'
+
         # Batch accumulator for compilation
         self.pending_operations: List[tuple] = []  # (cmd, response_placeholder)
 
@@ -51,12 +56,13 @@ class Worker:
             }
         }
 
-        # Create engine
-        self.engine: Engine = create_engine(backend)
+        # Create engine with compilation setting
+        self.engine: Engine = create_engine(backend, enable_compilation=enable_compilation)
 
         # Log batching mode
         if self.batch_size > 1 and self.engine.supports_batching():
-            print(f"Worker {self.worker_id}: Batching enabled (batch_size={self.batch_size})")
+            mode = "with compilation" if enable_compilation else "without compilation"
+            print(f"Worker {self.worker_id}: Message batching enabled (batch_size={self.batch_size}, {mode})")
         elif self.batch_size > 1 and not self.engine.supports_batching():
             print(f"Worker {self.worker_id}: Batching requested (batch_size={self.batch_size}) but engine doesn't support it")
         else:

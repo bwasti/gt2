@@ -25,33 +25,64 @@ GT_INSTRUCTION_LOG=/tmp/gt.log python train.py --epochs 1
 wc -l /tmp/gt.log  # Shows total instructions
 ```
 
-## Solution: Operation Batching
+## Solution: Two-Level Batching
 
-The framework supports batching operations together, but it's currently **broken**:
+GT supports two independent types of batching:
+
+### 1. Worker-Level Message Batching ✅ WORKING
+
+Batch operations at the worker to reduce dispatcher↔worker round-trips:
 
 ```bash
-# This fails with NoneType errors:
-GT_WORKER_BATCH_SIZE=10 python train.py
+# Batch 10 operations together, execute eagerly (no compilation)
+GT_WORKER_BATCH_SIZE=10 GT_COMPILE=0 python train.py
 ```
 
-**Problem**: The graph builder in `worker.py` doesn't correctly track intermediate tensor dependencies. When operations reference tensors created by previous operations in the same batch, those tensors are `None`.
+**How it works:**
+- Worker buffers up to N operations
+- Executes them as a batch (either eagerly or compiled)
+- Reduces worker round-trips by ~10x
 
-### What Needs to be Fixed
+**Status:** Working! Operations execute eagerly without dependency tracking issues.
 
-1. **Tensor Dependency Tracking** in `gt/worker/worker.py`:
-   - When batching operations, need to ensure intermediate results are available
-   - Build a proper dependency graph before execution
-   - Or execute in topological order within the batch
+### 2. Worker Compilation 🚧 BROKEN
 
-2. **PyTorch Backend Batching** in `gt/worker/engine/pytorch.py`:
-   - The `execute_batch()` method needs to handle intermediate tensors
-   - Currently has TODO comment about this issue (line 184-188)
+Compile batched operations with torch.compile():
 
-### Expected Speedup with Batching
+```bash
+# Enable compilation (currently broken):
+GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 python train.py
+```
 
-With batching enabled and working:
-- **10x-20x speedup** by amortizing network overhead
-- Batch of 10-100 operations → 1 round-trip instead of 40-400
+**Problem:** Graph building doesn't track intermediate tensor dependencies correctly, causing NoneType errors.
+
+**What needs fixing:**
+- `gt/worker/engine/pytorch.py` execute_batch() dependency tracking
+- Operations in a batch that depend on each other fail to resolve
+
+### 3. Client-Level Message Batching 📋 TODO
+
+Buffer operations at the client before sending to dispatcher:
+
+```bash
+# Future feature:
+GT_CLIENT_BATCH_SIZE=100 python train.py
+```
+
+**Would provide:**
+- Reduce client→dispatcher round-trips
+- Biggest potential speedup (eliminates most network overhead)
+
+**Implementation complexity:**
+- Need to buffer operations before sending
+- Handle sync points (.item(), .data, .backward()) that force flush
+- Map batch responses back to pending tensors
+
+### Expected Speedup
+
+- **Worker batching alone**: 1-2x (reduces worker communication)
+- **Client batching**: 5-10x (reduces client↔dispatcher messages)
+- **Both + compilation**: 10-20x (network + compute optimization)
 
 ## Current Workarounds
 
