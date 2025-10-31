@@ -15,6 +15,7 @@ from gt.transport.protocol import (
     WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
 )
 from gt.worker.engine import create_engine, Engine, Operation
+from gt.worker.hotpath_detector import HotPathDetector
 
 
 class Worker:
@@ -30,8 +31,9 @@ class Worker:
         self.backend_name = backend
         self.tensors = {}  # Map: tensor_id -> tensor
 
-        # Compilation disabled for now (has bugs)
-        enable_compilation = False
+        # Hot path detection configuration
+        auto_compile = os.environ.get('GT_AUTO_COMPILE', '0') == '1'
+        enable_compilation = auto_compile  # Enable compilation if auto-compile is on
 
         # Statistics tracking
         self.stats = {
@@ -43,7 +45,21 @@ class Worker:
         # Create engine
         self.engine: Engine = create_engine(backend, enable_compilation=enable_compilation)
 
-        print(f"Worker {self.worker_id}: Stream processing mode")
+        # Initialize hot path detector if enabled
+        self.hotpath_detector = None
+        if auto_compile:
+            window_size = int(os.environ.get('GT_HOTPATH_WINDOW', '20'))
+            hot_threshold = int(os.environ.get('GT_HOTPATH_THRESHOLD', '10'))
+            min_seq_length = int(os.environ.get('GT_HOTPATH_MIN_SEQ', '3'))
+
+            self.hotpath_detector = HotPathDetector(
+                window_size=window_size,
+                hot_threshold=hot_threshold,
+                min_sequence_length=min_seq_length,
+            )
+            print(f"Worker {self.worker_id}: Stream processing with hot path detection (threshold={hot_threshold})")
+        else:
+            print(f"Worker {self.worker_id}: Stream processing mode")
 
     def connect_to_dispatcher(self, dispatcher_host="localhost", dispatcher_port=9000):
         """Connect to dispatcher and start processing."""
@@ -75,6 +91,15 @@ class Worker:
     def _process_command(self, cmd: WorkerCommand) -> WorkerResponse:
         """Process a command from dispatcher (one at a time, no batching)."""
         try:
+            # Record instruction in hot path detector (before execution)
+            if self.hotpath_detector:
+                if isinstance(cmd, WorkerBinaryOp):
+                    self.hotpath_detector.record_instruction('binary', cmd.op, input_count=2)
+                elif isinstance(cmd, WorkerUnaryOp):
+                    # Only record compute ops, not creation ops
+                    if cmd.input_id is not None:
+                        self.hotpath_detector.record_instruction('unary', cmd.op, input_count=1)
+
             # Execute command immediately
             if isinstance(cmd, WorkerCreateTensor):
                 return self._handle_create_tensor(cmd)
@@ -85,6 +110,9 @@ class Worker:
             elif isinstance(cmd, WorkerReshapeOp):
                 return self._handle_reshape_op(cmd)
             elif isinstance(cmd, WorkerGetData):
+                # Sync point - reset sequence tracking
+                if self.hotpath_detector:
+                    self.hotpath_detector.reset_sequence()
                 return self._handle_get_data(cmd)
             elif isinstance(cmd, WorkerFreeTensor):
                 return self._handle_free_tensor(cmd)
@@ -256,4 +284,9 @@ class Worker:
         stats = {
             'operations': self.stats['operations'].copy()
         }
+
+        # Add hot path detection stats if enabled
+        if self.hotpath_detector:
+            stats['hotpath'] = self.hotpath_detector.get_stats()
+
         return WorkerResponse(success=True, data=stats)
