@@ -341,4 +341,9 @@ def _cleanup():
         except:
             pass
 
+        # Give daemon threads a brief moment to finish
+        # This prevents "Fatal Python error" from daemon threads writing to stdout during shutdown
+        import time
+        time.sleep(0.01)
+
 atexit.register(_cleanup)
