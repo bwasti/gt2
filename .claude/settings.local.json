@@ -5,7 +5,8 @@
       "Bash(python /home/bwasti/oss/gt2/benchmarks/profile_overhead.py:*)",
       "Bash(python examples/debug_demo.py:*)",
       "Bash(GT_WORKER_BATCH_SIZE=10 python train.py:*)",
-      "Bash(python -m cProfile:*)"
+      "Bash(python -m cProfile:*)",
+      "Bash(time GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 python examples/train_mlp_gt.py:*)"
     ],
     "deny": [],
     "ask": []
