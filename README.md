@@ -5,7 +5,7 @@ A distributed multiplexing tensor framework.  Top notch API.
 ## Features
 
 - **High-performance transport** - ZeroMQ (ZMQ) with automatic message batching and efficient DEALER/ROUTER pattern
-- **Instruction batching with torch.compile()** - Accumulate operations and compile with PyTorch's JIT
+- **Stream processing** - Workers process operations one at a time for simplicity
 - **Signal-based sharding** - Configure data/model/pipeline parallelism via YAML
 - **Autograd support** - Tape-based automatic differentiation
 - **Distributed execution** - Client-dispatcher-worker architecture
@@ -25,30 +25,9 @@ result = c.data.numpy()
 
 For distributed training, see [Distributed Setup](#distributed-setup).
 
-## Instruction Batching & torch.compile
+## Stream Processing
 
-Workers can batch operations and optionally compile them with `torch.compile()`:
-
-```bash
-# Enable batching (default: eager mode)
-GT_WORKER_BATCH_SIZE=10 python your_script.py
-
-# Enable batching + torch.compile (default: compilation disabled)
-GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 python your_script.py
-```
-
-**Behavior:**
-- **Batching only** (`GT_COMPILE=0`, default): Groups operations for efficient execution without compilation overhead
-- **Batching + compilation** (`GT_COMPILE=1`): Applies `torch.compile()` to batched operations
-- Each batch gets its own compiled function (no cross-batch caching due to tensor ID dependencies)
-- Performance varies based on operation patterns and hardware
-
-**When to use compilation:**
-- Training loops with repeated operation patterns
-- Large models where compilation overhead is amortized
-- Not recommended for one-off operations or small models
-
-See [docs/BATCHING_AND_COMPILATION.md](docs/BATCHING_AND_COMPILATION.md) for details.
+Workers process operations one at a time as they arrive from the dispatcher. This keeps the architecture simple and easy to reason about. Future optimizations may include automatic hot path detection and torch.compile() for repeated operation sequences.
 
 ## Signal-Based Sharding Configuration
 
@@ -273,15 +252,11 @@ c = a @ b
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GT_WORKER_BATCH_SIZE` | Batch size for instruction batching | `1` (eager) |
-| `GT_COMPILE` | Enable torch.compile() on batched operations | `0` (disabled) |
 | `GT_CONFIG` | Path to sharding config YAML | None |
 | `GT_INSTRUCTION_LOG` | Path to instruction stream log file | None |
 
 Example:
 ```bash
-GT_WORKER_BATCH_SIZE=10 \
-GT_COMPILE=1 \
 GT_CONFIG=sharding.yaml \
 GT_INSTRUCTION_LOG=debug.log \
 python train.py
@@ -363,12 +338,7 @@ pytest tests/ -v
 pytest tests/test_basic_ops.py -v
 pytest tests/test_autograd.py -v
 pytest tests/test_mlp.py -v
-
-# Test with batching enabled
-GT_WORKER_BATCH_SIZE=10 pytest tests/ -v
-
-# Test with batching and compilation enabled
-GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 pytest tests/test_compilation.py -v
+pytest tests/test_compilation.py -v
 ```
 
 Tests auto-start a local GT system and verify numeric correctness.
@@ -380,7 +350,7 @@ cd benchmarks
 python compare.py
 ```
 
-Note: GT adds communication/serialization overhead. For small operations this overhead is significant. For large operations (training, large matmuls), batching and compilation can reduce this overhead.
+Note: GT adds communication/serialization overhead. For small operations this overhead is significant. For large operations (training, large matmuls), this overhead becomes negligible.
 
 ## Architecture
 
@@ -422,8 +392,8 @@ Note: GT adds communication/serialization overhead. For small operations this ov
     ┌───▼────┐    ┌───▼────┐    ┌───▼────┐
     │Worker 0│    │Worker 1│    │Worker N│ (1 per GPU)
     │        │    │        │    │        │
-    │Batching│    │Batching│    │Batching│ Instruction batching
-    │Compile │    │Compile │    │Compile │ torch.compile caching
+    │ Stream │    │ Stream │    │ Stream │ Stream processing
+    │Process │    │Process │    │Process │ One op at a time
     │        │    │        │    │        │
     │PyTorch │    │PyTorch │    │PyTorch │ Backend
     │  GPU   │    │  GPU   │    │  GPU   │
@@ -435,7 +405,7 @@ Note: GT adds communication/serialization overhead. For small operations this ov
 
 - **gt/client/** - User-facing API with location-transparent tensors, tape-based autograd, signal tracking, and neural network modules
 - **gt/dispatcher/** - Coordinates clients and schedules operations using ZMQ ROUTER socket. Maps client tensors to physical locations, reads signal configs for sharding decisions, and logs instruction streams
-- **gt/worker/** - Executes operations using backends. Connects via ZMQ DEALER socket. Supports instruction batching, torch.compile() with caching, and multiple backends (PyTorch/NumPy). One worker per GPU.
+- **gt/worker/** - Executes operations using backends. Connects via ZMQ DEALER socket. Processes operations one at a time (stream processing). Supports multiple backends (PyTorch/NumPy). One worker per GPU.
 - **gt/transport/** - ZeroMQ-based communication layer with DEALER/ROUTER pattern for high-performance message passing
 - **gt/signal.py** - Signal-based sharding API with context managers, thread-local signal stack, and backward signal support
 - **gt/config.py** - YAML config loading that parses sharding strategies and maps signal names to worker assignments
@@ -443,8 +413,8 @@ Note: GT adds communication/serialization overhead. For small operations this ov
 ## Documentation
 
 - [Signal-Based Sharding Guide](examples/README_SIGNALS.md) - Complete guide to sharding API
-- [Batching & Compilation](docs/BATCHING_AND_COMPILATION.md) - How instruction batching works
 - [CLAUDE.md](CLAUDE.md) - Detailed architecture documentation
+- [Hot Path Detection](benchmarks/README_COMPILATION.md) - Automatic compilation for repeated patterns (future work)
 
 ## Design Philosophy
 
@@ -453,7 +423,7 @@ The code prioritizes:
 1. Clarity over performance in initial implementation
 2. PyTorch-compatible API
 3. Declarative configuration via YAML
-4. Automatic optimization via torch.compile
+4. Simple stream processing (one operation at a time)
 
 ## Examples
 
@@ -469,10 +439,10 @@ See [examples/](examples/) directory:
 
 ## Performance Considerations
 
-1. **Batching**: Enable with `GT_WORKER_BATCH_SIZE` for repeated operation patterns
-2. **Signals**: Use to control sharding strategies via configuration
-3. **Warmup**: First execution includes compilation overhead
-4. **Logging**: Use instruction logging to identify bottlenecks
+1. **Signals**: Use to control sharding strategies via configuration
+2. **Multiple Workers**: Scale across GPUs for data/model parallelism
+3. **Logging**: Use instruction logging to identify bottlenecks
+4. **Transport**: ZeroMQ provides efficient message batching at transport layer
 
 ## Contributing
 
