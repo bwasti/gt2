@@ -408,6 +408,18 @@ def _binary_op(op: str, left, right) -> Tensor:
                 # grad_B = A.T @ grad_C
                 grad_left = grad_output @ right.T
                 grad_right = left.T @ grad_output
+
+                # For batched left and non-batched right, sum grad_right across batch dim
+                # Example: (8, 128, 64) @ (64, 64) -> (8, 128, 64)
+                # grad_right = (8, 64, 128) @ (8, 128, 64) = (8, 64, 64)
+                # But right is (64, 64), so we need to sum: (8, 64, 64) -> (64, 64)
+                if len(left.shape) > len(right.shape):
+                    # Sum across leading batch dimensions
+                    grad_data = grad_right.data.numpy()
+                    for _ in range(len(left.shape) - len(right.shape)):
+                        grad_data = grad_data.sum(axis=0)
+                    grad_right = from_numpy(grad_data)
+
                 return [grad_left, grad_right]
             elif op == "gt":
                 # Comparison operations have zero gradient

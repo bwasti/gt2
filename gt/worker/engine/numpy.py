@@ -55,7 +55,9 @@ class NumpyEngine(Engine):
         return np.sqrt(tensor)
 
     def transpose(self, tensor: np.ndarray) -> np.ndarray:
-        return np.transpose(tensor)
+        # Swap last two dimensions (PyTorch/GT semantics)
+        # np.transpose() without args reverses ALL axes, but we only want last 2
+        return np.swapaxes(tensor, -2, -1)
 
     def supports_distributed(self) -> bool:
         return False
