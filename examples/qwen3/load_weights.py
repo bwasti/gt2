@@ -139,6 +139,19 @@ def verify_forward_pass(hf_model, gt_model, tokenizer):
 
 def main():
     """Load weights and verify."""
+    import os
+
+    # Use tiny model for testing by default
+    model_size = os.environ.get('MODEL_SIZE', 'tiny')
+
+    if model_size == 'tiny':
+        print("Using TINY model for testing (set MODEL_SIZE=1.7B for full model)")
+        print("Creating GT model...")
+        gt_model = create_model('tiny')
+        print("\nSkipping weight loading for tiny model (random weights)")
+        print("Done! Tiny model ready for testing.")
+        return
+
     # Create GT model
     print("Creating GT model...")
     gt_model = create_model('1.7B')

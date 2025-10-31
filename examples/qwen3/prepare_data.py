@@ -117,10 +117,47 @@ def save_dataset(tokenized_examples, output_dir="examples/qwen3/data"):
     print(f"  labels shape: {labels.shape}")
 
 
+def create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000):
+    """
+    Create synthetic data for testing (used with tiny model).
+
+    Returns random token IDs - just for testing the training pipeline.
+    """
+    print(f"Creating synthetic data for testing...")
+    print(f"  {num_samples} samples, seq_length={seq_length}, vocab_size={vocab_size}")
+
+    # Random token IDs
+    input_ids = np.random.randint(0, vocab_size, size=(num_samples, seq_length), dtype='int32')
+    labels = np.random.randint(0, vocab_size, size=(num_samples, seq_length), dtype='int32')
+
+    # Create tokenized examples in same format
+    tokenized_examples = []
+    for i in range(num_samples):
+        tokenized_examples.append({
+            'input_ids': input_ids[i],
+            'labels': labels[i],
+            'attention_mask': np.ones(seq_length, dtype='int32'),
+        })
+
+    return tokenized_examples
+
+
 def main():
     """Download and prepare dataset."""
-    # Load tokenizer
+    # Check if using tiny model (no tokenizer available)
     tokenizer_path = "examples/qwen3/tokenizer"
+    model_size = os.environ.get('MODEL_SIZE', 'tiny')
+
+    if model_size == 'tiny':
+        # Create synthetic data for testing
+        print("Using TINY model - creating synthetic data for testing")
+        tokenized = create_synthetic_data(num_samples=100, seq_length=128, vocab_size=1000)
+        save_dataset(tokenized)
+        print("\nSynthetic dataset ready!")
+        print("Training data ready at: examples/qwen3/data/")
+        return
+
+    # Full model path - need real tokenizer
     if not os.path.exists(tokenizer_path):
         print(f"Tokenizer not found at {tokenizer_path}")
         print("Please run load_weights.py first to download the tokenizer")

@@ -70,10 +70,6 @@ Column Details:
 
     def log(self, event_type: str, client_id: str, command_type: str, details: str = ""):
         """Log an operation event."""
-        # Skip logging if no file or console output enabled
-        if not self.file_handle and not self.console:
-            return
-
         with self.lock:
             elapsed = time.time() - self.start_time
             self.sequence += 1

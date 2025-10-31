@@ -2,14 +2,54 @@
 Train Qwen3-1.7B model using GT framework.
 
 Uses 'import gt as torch' pattern for easy benchmarking against PyTorch.
+Use --pytorch flag to run with pure PyTorch (no GT dispatcher).
 """
 
 import os
+import sys
 import time
+import argparse
 import numpy as np
-import gt as torch
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Train Qwen3 model with GT or PyTorch')
+    parser.add_argument('--pytorch', action='store_true',
+                        help='Use real PyTorch instead of GT (for benchmarking)')
+    parser.add_argument('--batch-size', type=int, default=2,
+                        help='Batch size for training (default: 2)')
+    parser.add_argument('--lr', type=float, default=1e-5,
+                        help='Learning rate (default: 1e-5)')
+    parser.add_argument('--epochs', type=int, default=3,
+                        help='Number of epochs (default: 3)')
+    parser.add_argument('--model-size', type=str, default=None,
+                        help='Model size: tiny or 1.7B (default: from MODEL_SIZE env or tiny)')
+    return parser.parse_args()
+
+
+# Parse arguments first
+args = parse_args()
+
+# Set environment variables so model.py can see them
+if args.pytorch:
+    os.environ['USE_PYTORCH'] = '1'
+if args.model_size:
+    os.environ['MODEL_SIZE'] = args.model_size
+
+# Switch between GT and PyTorch for benchmarking
+USE_PYTORCH = args.pytorch or os.environ.get('USE_PYTORCH', '0') == '1'
+
+if USE_PYTORCH:
+    import torch
+    from torch.optim import SGD
+    print("Using PyTorch backend")
+else:
+    import gt as torch
+    from gt.nn import SGD
+    print("Using GT backend")
+
 from model import create_model
-from gt.nn import SGD
 
 
 class DataLoader:
@@ -68,6 +108,7 @@ def cross_entropy_loss(logits, labels):
 
     # Simplified: just use sum of squares as proxy loss
     # Real implementation would use cross_entropy
+    # This works for both GT and PyTorch
     loss = (logits * logits).sum() / (logits.shape[0] * logits.shape[1] * logits.shape[2])
 
     return loss
@@ -104,7 +145,7 @@ def train_epoch(model, dataloader, optimizer, epoch):
         optimizer.step()
         optimizer.zero_grad()
 
-        # Get loss value
+        # Get loss value (both PyTorch and GT tensors have .item())
         loss_val = loss.item()
         total_loss += loss_val
         num_batches += 1
@@ -128,15 +169,21 @@ def train_epoch(model, dataloader, optimizer, epoch):
 
 def main():
     """Main training loop."""
+    # Get model size from args or environment
+    model_size = args.model_size or os.environ.get('MODEL_SIZE', 'tiny')
+
     print("="*60)
-    print("Qwen3-1.7B Training with GT")
+    backend = "PyTorch" if USE_PYTORCH else "GT"
+    print(f"Qwen3 Training with {backend} (model={model_size})")
     print("="*60)
 
-    # Configuration
-    batch_size = 2  # Small batch size for initial testing
-    learning_rate = 1e-5
-    num_epochs = 3
+    # Configuration from args
+    batch_size = args.batch_size
+    learning_rate = args.lr
+    num_epochs = args.epochs
     data_dir = "examples/qwen3/data"
+
+    print(f"Config: batch_size={batch_size}, lr={learning_rate}, epochs={num_epochs}")
 
     # Load data
     print(f"\nLoading data from {data_dir}...")
@@ -150,8 +197,8 @@ def main():
     print(f"  Created dataloader with {len(dataloader)} batches")
 
     # Create model
-    print("\nCreating model...")
-    model = create_model('1.7B')
+    print(f"\nCreating model ({model_size})...")
+    model = create_model(model_size)
     print("  Model created")
 
     # Create optimizer

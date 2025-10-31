@@ -4,8 +4,16 @@ Qwen3 model implementation using GT's PyTorch-like API.
 Architecture based on Qwen3-1.7B.
 """
 
-import gt as torch
+import os
 import numpy as np
+
+# Switch between GT and PyTorch for benchmarking
+USE_PYTORCH = os.environ.get('USE_PYTORCH', '0') == '1'
+
+if USE_PYTORCH:
+    import torch
+else:
+    import gt as torch
 
 
 class RMSNorm:
@@ -13,7 +21,7 @@ class RMSNorm:
 
     def __init__(self, dim, eps=1e-6):
         self.eps = eps
-        self.weight = torch.from_numpy(np.ones(dim, dtype='float32'))
+        self.weight = torch.from_numpy(np.ones(dim, dtype='float32')).requires_grad_(True)
 
     def __call__(self, x):
         # RMS normalization: x / sqrt(mean(x^2) + eps) * weight
@@ -68,16 +76,16 @@ class Attention:
         # Q, K, V projections
         self.q_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, self.hidden_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
         self.k_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, self.hidden_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
         self.v_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, self.hidden_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
         self.o_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, self.hidden_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
 
         self.rotary_emb = RotaryEmbedding(self.head_dim)
 
@@ -111,13 +119,13 @@ class MLP:
 
         self.gate_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, self.intermediate_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
         self.up_proj = torch.from_numpy(
             np.random.randn(self.hidden_size, self.intermediate_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
         self.down_proj = torch.from_numpy(
             np.random.randn(self.intermediate_size, self.hidden_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
 
     def __call__(self, x):
         # SwiGLU activation: gate_proj(x) * swish(up_proj(x))
@@ -170,7 +178,7 @@ class Qwen3Model:
         # Embeddings
         self.embed_tokens = torch.from_numpy(
             np.random.randn(self.vocab_size, self.hidden_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
 
         # Transformer layers
         self.layers = [TransformerBlock(config) for _ in range(self.num_layers)]
@@ -199,9 +207,7 @@ class Qwen3Model:
         # TODO: Implement gather/index_select operation
 
         # For now, just use a small slice
-        from gt import from_numpy
-        import numpy as np
-        hidden_states = from_numpy(
+        hidden_states = torch.from_numpy(
             np.random.randn(batch_size, seq_len, self.hidden_size).astype('float32') * 0.02
         )
 
@@ -226,7 +232,7 @@ class Qwen3ForCausalLM:
         # LM head
         self.lm_head = torch.from_numpy(
             np.random.randn(self.hidden_size, self.vocab_size).astype('float32') * 0.02
-        )
+        ).requires_grad_(True)
 
     def __call__(self, input_ids):
         hidden_states = self.model(input_ids)

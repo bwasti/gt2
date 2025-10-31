@@ -158,6 +158,8 @@ class PyTorchEngine(Engine):
                         results[op.result_id] = self.torch.mean(input_tensor)
                     elif op.op_name == 'transpose':
                         results[op.result_id] = self.torch.transpose(input_tensor, -2, -1)
+                    elif op.op_name == 'sqrt':
+                        results[op.result_id] = self.torch.sqrt(input_tensor)
                     else:
                         raise ValueError(f"Unknown unary op: {op.op_name}")
 
@@ -178,6 +180,12 @@ class PyTorchEngine(Engine):
 
         Returns:
             Dictionary of newly created tensors (result_id -> tensor)
+
+        TODO: Batched execution is currently broken - graph building doesn't handle
+        all tensor dependencies correctly, resulting in NoneType errors. Intermediate
+        tensors from scalar operations (e.g., from .sum(), .mean()) aren't being
+        tracked properly in the operation graph. Need to fix tensor dependency
+        tracking in the worker or dispatcher.
         """
         if not self.enable_compilation or len(operations) == 1:
             # Fall back to eager execution for single operations
@@ -254,6 +262,8 @@ class PyTorchEngine(Engine):
                     result = self.mean(input_tensor)
                 elif op.op_name == 'transpose':
                     result = self.transpose(input_tensor)
+                elif op.op_name == 'sqrt':
+                    result = self.sqrt(input_tensor)
                 else:
                     raise ValueError(f"Unknown unary op: {op.op_name}")
 

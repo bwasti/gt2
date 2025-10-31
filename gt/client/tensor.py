@@ -236,6 +236,22 @@ class Tensor:
         graph = get_graph()
         graph.backward(self)
 
+    def requires_grad_(self, requires_grad=True):
+        """
+        Set requires_grad flag in-place (PyTorch-compatible).
+
+        Args:
+            requires_grad: Whether to track gradients
+
+        Returns:
+            self (for chaining)
+
+        Example:
+            tensor.requires_grad_(True)
+        """
+        self.requires_grad = requires_grad
+        return self
+
 
 def _binary_op(op: str, left, right) -> Tensor:
     """Execute a binary operation."""
