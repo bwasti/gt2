@@ -10,9 +10,9 @@ import threading
 import time
 from gt.transport.connection import create_server, Connection
 from gt.transport.protocol import (
-    ClientCommand, CreateTensor, BinaryOp, UnaryOp, GetData, FreeTensor, CopyTensor,
+    ClientCommand, CreateTensor, BinaryOp, UnaryOp, ReshapeOp, GetData, FreeTensor, CopyTensor,
     CompileStart, CompileEnd, GetWorkerStats, RegisterWorker,
-    ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
+    ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp,
     WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
 )
 from gt.dispatcher.tensor_handle import TensorHandle
@@ -314,6 +314,8 @@ class Dispatcher:
                 return self._handle_binary_op(cmd, client_id)
             elif isinstance(cmd, UnaryOp):
                 return self._handle_unary_op(cmd, client_id)
+            elif isinstance(cmd, ReshapeOp):
+                return self._handle_reshape_op(cmd, client_id)
             elif isinstance(cmd, GetData):
                 return self._handle_get_data(cmd, client_id)
             elif isinstance(cmd, FreeTensor):
@@ -450,7 +452,9 @@ class Dispatcher:
                 op=cmd.op,
                 input_id=None,
                 shape=cmd.shape,
-                dtype=cmd.dtype
+                dtype=cmd.dtype,
+                axis=getattr(cmd, 'axis', None),
+                keepdims=getattr(cmd, 'keepdims', False)
             )
             send_size = self._send_to_worker(worker, worker_cmd)
             self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} shape={cmd.shape}", size_bytes=send_size)
@@ -495,7 +499,9 @@ class Dispatcher:
         worker_cmd = WorkerUnaryOp(
             result_id=result_tensor_id,
             op=cmd.op,
-            input_id=input_loc.worker_tensor_id
+            input_id=input_loc.worker_tensor_id,
+            axis=getattr(cmd, 'axis', None),
+            keepdims=getattr(cmd, 'keepdims', False)
         )
         send_size = self._send_to_worker(worker, worker_cmd)
         self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} input={input_loc.worker_tensor_id}", size_bytes=send_size)
@@ -511,6 +517,81 @@ class Dispatcher:
             worker_id=worker["id"],
             worker_tensor_id=result_tensor_id,
             shape=input_loc.shape,  # Placeholder
+            dtype=input_loc.dtype
+        )
+
+        return ClientResponse(success=True)
+
+    def _handle_reshape_op(self, cmd: ReshapeOp, client_id: str) -> ClientResponse:
+        """Handle reshape operation (reshape, unsqueeze, squeeze)."""
+        # Get location of input tensor
+        input_locs = self.tensor_handles.get_locations(client_id, cmd.input_id)
+        if not input_locs:
+            return ClientResponse(success=False, error="Input tensor not found")
+
+        # For now, only support non-sharded tensors
+        # TODO: Handle sharded tensors (would need to reshape each shard)
+        if len(input_locs) > 1:
+            return ClientResponse(success=False, error="Reshape on sharded tensors not yet supported")
+
+        input_loc = input_locs[0]
+        worker = self._get_worker(input_loc.worker_id)
+        if not worker:
+            return ClientResponse(success=False, error="Worker not found")
+
+        result_tensor_id = f"{client_id}_{cmd.result_id}"
+
+        worker_cmd = WorkerReshapeOp(
+            result_id=result_tensor_id,
+            op=cmd.op,
+            input_id=input_loc.worker_tensor_id,
+            params=cmd.params
+        )
+        send_size = self._send_to_worker(worker, worker_cmd)
+        self._log_worker_cmd(worker["id"], "WorkerReshapeOp", f"op={cmd.op} params={cmd.params}", size_bytes=send_size)
+        worker_response, recv_size = self._recv_from_worker(worker)
+        self._log_worker_response(worker["id"], "WorkerReshapeOp", worker_response.success, size_bytes=recv_size)
+
+        if not worker_response.success:
+            return ClientResponse(success=False, error=worker_response.error)
+
+        # Compute result shape based on operation
+        import numpy as np
+        result_shape = input_loc.shape
+        if cmd.op == "reshape":
+            result_shape = cmd.params
+        elif cmd.op == "unsqueeze":
+            dim = cmd.params[0]
+            if input_loc.shape:
+                shape_list = list(input_loc.shape)
+                # Handle negative dimensions
+                if dim < 0:
+                    dim = len(shape_list) + dim + 1
+                shape_list.insert(dim, 1)
+                result_shape = tuple(shape_list)
+            else:
+                result_shape = (1,)
+        elif cmd.op == "squeeze":
+            if input_loc.shape:
+                if len(cmd.params) == 0:
+                    # Squeeze all dimensions of size 1
+                    result_shape = tuple(d for d in input_loc.shape if d != 1)
+                else:
+                    # Squeeze specific dimension
+                    dim = cmd.params[0]
+                    shape_list = list(input_loc.shape)
+                    if shape_list[dim] == 1:
+                        shape_list.pop(dim)
+                    result_shape = tuple(shape_list)
+            else:
+                result_shape = ()
+
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_tensor_id,
+            shape=result_shape,
             dtype=input_loc.dtype
         )
 

@@ -41,11 +41,11 @@ class PyTorchEngine(Engine):
 
     def randn(self, shape: tuple, dtype: str = 'float32'):
         torch_dtype = getattr(self.torch, dtype)
-        return self.torch.randn(shape, dtype=torch_dtype, device=self.device)
+        return self.torch.randn(*shape, dtype=torch_dtype, device=self.device)
 
     def zeros(self, shape: tuple, dtype: str = 'float32'):
         torch_dtype = getattr(self.torch, dtype)
-        return self.torch.zeros(shape, dtype=torch_dtype, device=self.device)
+        return self.torch.zeros(*shape, dtype=torch_dtype, device=self.device)
 
     def matmul(self, a, b):
         return self.torch.matmul(a, b)
@@ -56,15 +56,27 @@ class PyTorchEngine(Engine):
     def mul(self, a, b):
         return a * b
 
-    def sum(self, tensor, axis: Optional[int] = None):
+    def sum(self, tensor, axis: Optional[int] = None, keepdims: bool = False):
         if axis is None:
+            # Full reduction - sum all elements
+            if keepdims:
+                # For keepdims with full reduction, we need to keep all dims as 1
+                shape = tuple([1] * len(tensor.shape))
+                return self.torch.sum(tensor).reshape(shape)
             return self.torch.sum(tensor)
-        return self.torch.sum(tensor, dim=axis)
+        # Axis-specific reduction
+        return self.torch.sum(tensor, dim=axis, keepdim=keepdims)
 
-    def mean(self, tensor, axis: Optional[int] = None):
+    def mean(self, tensor, axis: Optional[int] = None, keepdims: bool = False):
         if axis is None:
+            # Full reduction - mean of all elements
+            if keepdims:
+                # For keepdims with full reduction, we need to keep all dims as 1
+                shape = tuple([1] * len(tensor.shape))
+                return self.torch.mean(tensor).reshape(shape)
             return self.torch.mean(tensor)
-        return self.torch.mean(tensor, dim=axis)
+        # Axis-specific reduction
+        return self.torch.mean(tensor, dim=axis, keepdim=keepdims)
 
     def relu(self, tensor):
         return self.torch.relu(tensor)
@@ -153,9 +165,14 @@ class PyTorchEngine(Engine):
                     elif op.op_name == 'log':
                         results[op.result_id] = self.torch.log(input_tensor)
                     elif op.op_name == 'sum':
-                        results[op.result_id] = self.torch.sum(input_tensor)
+                        # Use axis and keepdims from params
+                        axis = op.params.get('axis', None)
+                        keepdims = op.params.get('keepdims', False)
+                        results[op.result_id] = self.sum(input_tensor, axis=axis, keepdims=keepdims)
                     elif op.op_name == 'mean':
-                        results[op.result_id] = self.torch.mean(input_tensor)
+                        axis = op.params.get('axis', None)
+                        keepdims = op.params.get('keepdims', False)
+                        results[op.result_id] = self.mean(input_tensor, axis=axis, keepdims=keepdims)
                     elif op.op_name == 'transpose':
                         results[op.result_id] = self.torch.transpose(input_tensor, -2, -1)
                     elif op.op_name == 'sqrt':
@@ -257,9 +274,14 @@ class PyTorchEngine(Engine):
                 elif op.op_name == 'log':
                     result = self.torch.log(input_tensor)
                 elif op.op_name == 'sum':
-                    result = self.sum(input_tensor)
+                    # Use axis and keepdims from params
+                    axis = op.params.get('axis', None)
+                    keepdims = op.params.get('keepdims', False)
+                    result = self.sum(input_tensor, axis=axis, keepdims=keepdims)
                 elif op.op_name == 'mean':
-                    result = self.mean(input_tensor)
+                    axis = op.params.get('axis', None)
+                    keepdims = op.params.get('keepdims', False)
+                    result = self.mean(input_tensor, axis=axis, keepdims=keepdims)
                 elif op.op_name == 'transpose':
                     result = self.transpose(input_tensor)
                 elif op.op_name == 'sqrt':

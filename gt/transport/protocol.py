@@ -41,11 +41,14 @@ class BinaryOp(ClientCommand):
 class UnaryOp(ClientCommand):
     """Unary operation: result = op(input)."""
     result_id: int
-    op: str  # "randn", "exp", "log", etc.
+    op: str  # "randn", "exp", "log", "sum", "mean", etc.
     input_id: Optional[int]  # None for ops like randn that create data
     shape: Optional[tuple] = None  # for randn, etc.
     dtype: Optional[str] = None
     signal: Optional[str] = None  # Signal name for sharding config
+    # For reduction operations (sum, mean, etc.)
+    axis: Optional[int] = None  # Axis to reduce over (None = all axes)
+    keepdims: bool = False  # Whether to keep reduced dimensions
 
 
 @dataclass
@@ -161,6 +164,18 @@ class WorkerUnaryOp(WorkerCommand):
     input_id: Optional[str]
     shape: Optional[tuple] = None
     dtype: Optional[str] = None
+    # For reduction operations (sum, mean, etc.)
+    axis: Optional[int] = None  # Axis to reduce over (None = all axes)
+    keepdims: bool = False  # Whether to keep reduced dimensions
+
+
+@dataclass
+class WorkerReshapeOp(WorkerCommand):
+    """Execute reshape operation on worker."""
+    result_id: str
+    op: str  # "reshape", "unsqueeze", "squeeze"
+    input_id: str
+    params: tuple  # reshape: new_shape, unsqueeze: (dim,), squeeze: () or (dim,)
 
 
 @dataclass

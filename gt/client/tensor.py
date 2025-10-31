@@ -166,11 +166,29 @@ class Tensor:
     def log(self):
         return _unary_op("log", self)
 
-    def sum(self):
-        return _unary_op("sum", self)
+    def sum(self, axis=None, keepdims=False):
+        """Sum tensor elements along specified axis.
+
+        Args:
+            axis: Axis or tuple of axes to sum over. None means sum all elements.
+            keepdims: Whether to keep reduced dimensions (size 1).
+
+        Returns:
+            Tensor with summed values
+        """
+        if axis is None and not keepdims:
+            # Legacy behavior: sum all elements to scalar
+            return _unary_op("sum", self)
+        else:
+            # New behavior: axis-aware sum
+            return _reduce_op("sum", self, axis=axis, keepdims=keepdims)
 
     def mean(self):
-        return _unary_op("mean", self)
+        """Compute mean as sum() / n to avoid duplicate gradient code."""
+        import numpy as np
+        total_sum = self.sum()
+        n = np.prod(self.shape) if self.shape else 1
+        return total_sum / from_numpy(np.array(n, dtype='float32'))
 
     def relu(self):
         """ReLU activation: max(0, x)"""
@@ -233,8 +251,8 @@ class Tensor:
         """Zero out the tensor in-place (PyTorch-style)."""
         # For gradient tensors, just detach them so they'll be recreated on next backward
         # This is simpler than actually zeroing the data
-        if self.shape is None:
-            # Gradient tensor without shape info - just mark for GC
+        if self.shape is None or self.shape == ():
+            # Gradient tensor without shape info or scalar - just mark for GC
             self._finalizer.detach()
             return self
 
@@ -364,13 +382,16 @@ def _binary_op(op: str, left, right) -> Tensor:
                     axes_to_sum.append(i)
 
             if axes_to_sum:
-                # Sum and reshape
-                grad_data = grad.data.numpy()
+                # ✅ REMOTE EXECUTION: Use tensor operations that execute on worker
+                # This eliminates the need to fetch data to client
+                result = grad
                 for axis in sorted(axes_to_sum, reverse=True):
-                    grad_data = grad_data.sum(axis=axis, keepdims=True)
-                # Remove dimensions that were added
-                grad_data = grad_data.reshape(original_shape)
-                return from_numpy(grad_data)
+                    # Don't use keepdims to avoid needing reshape later
+                    result = result.sum(axis=axis, keepdims=False)
+
+                # The result shape should now match original_shape
+                # (since we summed without keepdims and in reverse sorted order)
+                return result
 
             return grad
 
@@ -414,11 +435,9 @@ def _binary_op(op: str, left, right) -> Tensor:
                 # grad_right = (8, 64, 128) @ (8, 128, 64) = (8, 64, 64)
                 # But right is (64, 64), so we need to sum: (8, 64, 64) -> (64, 64)
                 if len(left.shape) > len(right.shape):
-                    # Sum across leading batch dimensions
-                    grad_data = grad_right.data.numpy()
+                    # Sum across leading batch dimensions using remote operations
                     for _ in range(len(left.shape) - len(right.shape)):
-                        grad_data = grad_data.sum(axis=0)
-                    grad_right = from_numpy(grad_data)
+                        grad_right = grad_right.sum(axis=0, keepdims=False)
 
                 return [grad_left, grad_right]
             elif op == "gt":
@@ -491,22 +510,19 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
 
             if op == "sum":
                 # grad of sum: broadcast scalar gradient to input shape
-                # Create a tensor filled with the gradient value
-                grad_val = grad_output.data.numpy()
-                if input_tensor.shape:
-                    broadcasted = np.full(input_tensor.shape, grad_val, dtype='float32')
-                    return [from_numpy(broadcasted)]
+                # Use broadcasting instead of creating full array:
+                # grad_output (scalar) will broadcast when added to existing gradients
+                # We need to create a tensor with the right shape filled with ones, then multiply
+                if input_tensor.shape and input_tensor.shape != ():
+                    # Create ones with input shape, multiply by scalar gradient
+                    ones = zeros(*input_tensor.shape, dtype=input_tensor.dtype) + from_numpy(np.array(1.0, dtype='float32'))
+                    return [grad_output * ones]
                 else:
                     return [grad_output]
             elif op == "mean":
-                # grad of mean: broadcast grad_output to input shape and divide by n
-                grad_val = grad_output.data.numpy()
-                if input_tensor.shape:
-                    n = np.prod(input_tensor.shape)
-                    broadcasted = np.full(input_tensor.shape, grad_val / n, dtype='float32')
-                    return [from_numpy(broadcasted)]
-                else:
-                    return [grad_output]
+                # mean is now implemented as sum() / n, so this gradient code is unused
+                # Keeping for compatibility if called directly
+                raise RuntimeError("mean gradient should not be called - mean is implemented via sum/div")
             elif op == "exp":
                 # grad of exp(x) is exp(x) * grad_output = result * grad_output
                 return [grad_output * result]
@@ -626,6 +642,92 @@ def _reshape_op(op: str, input_tensor: Tensor, params: tuple) -> Tensor:
                     return [grad_output.unsqueeze(dim)]
             else:
                 raise RuntimeError(f"Gradient not implemented for {op}")
+
+        graph.record(result, [input_tensor], grad_fn)
+
+    return result
+
+
+def _reduce_op(op: str, input_tensor: Tensor, axis=None, keepdims=False) -> Tensor:
+    """Execute a reduction operation with axis support."""
+    from gt.transport.protocol import UnaryOp, ClientResponse
+    from gt.client.autograd import get_graph
+    import numpy as np
+
+    if _client_connection is None:
+        raise RuntimeError("Not connected to dispatcher")
+
+    requires_grad = input_tensor.requires_grad
+
+    result = Tensor(requires_grad=requires_grad)
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
+    cmd = UnaryOp(
+        result_id=result.id,
+        op=op,
+        input_id=input_tensor.id,
+        axis=axis,
+        keepdims=keepdims,
+        signal=signal_name
+    )
+
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
+
+    if not response.success:
+        raise RuntimeError(f"Operation {op} failed: {response.error}")
+
+    # Compute result shape based on axis and keepdims
+    if input_tensor.shape:
+        if axis is None:
+            # Reduce all axes
+            result.shape = () if not keepdims else tuple([1] * len(input_tensor.shape))
+        else:
+            # Reduce specific axis
+            shape_list = list(input_tensor.shape)
+            if keepdims:
+                shape_list[axis] = 1
+            else:
+                shape_list.pop(axis)
+            result.shape = tuple(shape_list)
+    else:
+        result.shape = ()
+    result.dtype = input_tensor.dtype
+
+    # Record on autograd tape if needed
+    if requires_grad:
+        graph = get_graph()
+
+        # Define gradient function for axis-aware reductions
+        def grad_fn(grad_output):
+            if op == "sum":
+                # grad of sum: broadcast scalar/reduced gradient to input shape
+                if axis is None:
+                    # Full reduction - broadcast to full shape
+                    # ✅ REMOTE EXECUTION: Use tensor operations instead of fetch-create-upload
+                    if input_tensor.shape and input_tensor.shape != ():
+                        # Create ones tensor and multiply by gradient (broadcasting happens remotely)
+                        ones = zeros(*input_tensor.shape, dtype=input_tensor.dtype) + from_numpy(np.array(1.0, dtype='float32'))
+                        return [grad_output * ones]
+                    else:
+                        return [grad_output]
+                else:
+                    # Axis-specific reduction - need to unsqueeze if not keepdims
+                    if not keepdims:
+                        grad_output = grad_output.unsqueeze(axis)
+                    # ✅ REMOTE EXECUTION: Broadcast via tensor operations
+                    # Create zeros with input shape, add unsqueezed gradient (broadcasting happens remotely)
+                    result = zeros(*input_tensor.shape, dtype=input_tensor.dtype) + grad_output
+                    return [result]
+            else:
+                raise RuntimeError(f"Gradient not implemented for axis-aware {op}")
 
         graph.record(result, [input_tensor], grad_fn)
 

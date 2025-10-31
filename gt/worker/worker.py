@@ -11,7 +11,7 @@ import numpy as np
 from typing import List, Dict, Any
 from gt.transport.connection import connect, Connection
 from gt.transport.protocol import (
-    WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp,
+    WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp,
     WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
 )
 from gt.worker.engine import create_engine, Engine, Operation
@@ -135,6 +135,8 @@ class Worker:
                     return self._add_to_batch(cmd)
                 else:
                     return self._handle_unary_op(cmd)
+            elif isinstance(cmd, WorkerReshapeOp):
+                return self._handle_reshape_op(cmd)
             elif isinstance(cmd, WorkerGetData):
                 return self._handle_get_data(cmd)
             elif isinstance(cmd, WorkerFreeTensor):
@@ -198,7 +200,12 @@ class Worker:
                     op_name=cmd.op,
                     result_id=cmd.result_id,
                     input_ids=[cmd.input_id],
-                    params={'shape': cmd.shape, 'dtype': cmd.dtype}
+                    params={
+                        'shape': cmd.shape,
+                        'dtype': cmd.dtype,
+                        'axis': getattr(cmd, 'axis', None),
+                        'keepdims': getattr(cmd, 'keepdims', False)
+                    }
                 ))
 
         # Execute batch
@@ -288,9 +295,14 @@ class Worker:
         elif cmd.op == "log":
             result = np.log(input_tensor) if self.backend_name == "numpy" else input_tensor.log()  # TODO: add to engine
         elif cmd.op == "sum":
-            result = self.engine.sum(input_tensor)
+            # Pass axis and keepdims for axis-aware reductions
+            axis = getattr(cmd, 'axis', None)
+            keepdims = getattr(cmd, 'keepdims', False)
+            result = self.engine.sum(input_tensor, axis=axis, keepdims=keepdims)
         elif cmd.op == "mean":
-            result = self.engine.mean(input_tensor)
+            axis = getattr(cmd, 'axis', None)
+            keepdims = getattr(cmd, 'keepdims', False)
+            result = self.engine.mean(input_tensor, axis=axis, keepdims=keepdims)
         elif cmd.op == "relu":
             result = self.engine.relu(input_tensor)
         elif cmd.op == "sigmoid":
@@ -303,6 +315,48 @@ class Worker:
             result = self.engine.transpose(input_tensor)
         else:
             return WorkerResponse(success=False, error=f"Unknown op: {cmd.op}")
+
+        self.tensors[cmd.result_id] = result
+        return WorkerResponse(success=True)
+
+    def _handle_reshape_op(self, cmd: WorkerReshapeOp) -> WorkerResponse:
+        """Execute reshape operation (reshape, unsqueeze, squeeze)."""
+        self.stats['operations']['total'] += 1
+
+        if cmd.input_id not in self.tensors:
+            return WorkerResponse(success=False, error="Input tensor not found")
+
+        input_tensor = self.tensors[cmd.input_id]
+
+        # Execute reshape operation using PyTorch/NumPy primitives
+        if cmd.op == "reshape":
+            new_shape = cmd.params
+            if self.backend_name == "pytorch":
+                result = input_tensor.reshape(*new_shape)
+            else:
+                result = input_tensor.reshape(new_shape)
+        elif cmd.op == "unsqueeze":
+            dim = cmd.params[0]
+            if self.backend_name == "pytorch":
+                result = input_tensor.unsqueeze(dim)
+            else:
+                result = np.expand_dims(input_tensor, axis=dim)
+        elif cmd.op == "squeeze":
+            if len(cmd.params) == 0:
+                # Squeeze all dimensions of size 1
+                if self.backend_name == "pytorch":
+                    result = input_tensor.squeeze()
+                else:
+                    result = np.squeeze(input_tensor)
+            else:
+                # Squeeze specific dimension
+                dim = cmd.params[0]
+                if self.backend_name == "pytorch":
+                    result = input_tensor.squeeze(dim)
+                else:
+                    result = np.squeeze(input_tensor, axis=dim)
+        else:
+            return WorkerResponse(success=False, error=f"Unknown reshape op: {cmd.op}")
 
         self.tensors[cmd.result_id] = result
         return WorkerResponse(success=True)
