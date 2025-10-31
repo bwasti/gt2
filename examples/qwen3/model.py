@@ -92,12 +92,6 @@ class Attention:
     def __call__(self, hidden_states):
         # hidden_states shape: (batch, seq_len, hidden_size)
 
-        # DEBUG: Print shapes and tensor IDs
-        import os
-        if os.environ.get('DEBUG_SHAPES'):
-            print(f"  [Attention] hidden_states: shape={hidden_states.shape}, id={hidden_states.id}")
-            print(f"  [Attention] v_proj: shape={self.v_proj.shape}, id={self.v_proj.id}")
-
         # Project to Q, K, V
         q = hidden_states @ self.q_proj
         k = hidden_states @ self.k_proj

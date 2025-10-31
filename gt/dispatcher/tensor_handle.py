@@ -53,24 +53,14 @@ class TensorHandle:
 
         # For sharding, append to list. For non-sharded, replace any existing location.
         # This handles tensor ID reuse (e.g., from in-place operations like weight -= grad)
-        import os
         if shard_info:
             # Sharded tensor: append to list
             if key not in self.locations:
                 self.locations[key] = []
             self.locations[key].append(location)
-            if os.environ.get('DEBUG_TENSOR_REGISTER'):
-                print(f"[TensorHandle] Registered SHARD: {key} -> {worker_tensor_id} (total shards: {len(self.locations[key])})")
         else:
             # Non-sharded tensor: replace any existing location
-            had_old = key in self.locations
-            old_worker_id = self.locations[key][0].worker_tensor_id if had_old else None
             self.locations[key] = [location]
-            if os.environ.get('DEBUG_TENSOR_REGISTER'):
-                if had_old:
-                    print(f"[TensorHandle] REPLACED: {key} -> {worker_tensor_id} (was: {old_worker_id})")
-                else:
-                    print(f"[TensorHandle] Registered: {key} -> {worker_tensor_id}")
 
     def get_locations(self, client_id: str, tensor_id: int) -> List[TensorLocation]:
         """Get all locations of a tensor (list for sharded tensors)."""
