@@ -25,6 +25,14 @@ import atexit
 import numpy as np
 from typing import Optional, List, Union
 
+# Dtype constants (PyTorch-compatible)
+# These are string constants that work with GT's dtype system
+float32 = 'float32'
+float64 = 'float64'
+int32 = 'int32'
+int64 = 'int64'
+bool = 'bool'
+
 # Global state
 _connected = False
 _auto_server = None

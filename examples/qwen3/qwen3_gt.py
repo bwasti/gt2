@@ -37,7 +37,7 @@ class RMSNorm:
         self.eps = eps
         self.dim = dim
         # Initialize weight to ones
-        self.weight = torch.from_numpy(np.ones(dim, dtype='float32')).requires_grad_(True)
+        self.weight = (torch.zeros(dim, dtype=torch.float32) + 1.0).requires_grad_(True)
 
     def __call__(self, x):
         # x shape: (batch, seq_len, dim)
@@ -76,14 +76,10 @@ class Attention:
         std = 0.02
 
         # QKV combined projection for efficiency
-        self.qkv_proj = torch.from_numpy(
-            np.random.randn(self.hidden_size, 3 * self.hidden_size).astype('float32') * std
-        ).requires_grad_(True)
+        self.qkv_proj = (torch.randn(self.hidden_size, 3 * self.hidden_size, dtype=torch.float32) * std).requires_grad_(True)
 
         # Output projection (takes 3*hidden as input from QKV fusion)
-        self.o_proj = torch.from_numpy(
-            np.random.randn(3 * self.hidden_size, self.hidden_size).astype('float32') * std
-        ).requires_grad_(True)
+        self.o_proj = (torch.randn(3 * self.hidden_size, self.hidden_size, dtype=torch.float32) * std).requires_grad_(True)
 
     def __call__(self, x):
         # x shape: (batch, seq_len, hidden_size)
@@ -114,14 +110,10 @@ class MLP:
         std = 0.02
 
         # Gate and Up projections (can be fused)
-        self.gate_up_proj = torch.from_numpy(
-            np.random.randn(self.hidden_size, 2 * self.intermediate_size).astype('float32') * std
-        ).requires_grad_(True)
+        self.gate_up_proj = (torch.randn(self.hidden_size, 2 * self.intermediate_size, dtype=torch.float32) * std).requires_grad_(True)
 
         # Down projection (takes 2*intermediate as input from gate_up fusion)
-        self.down_proj = torch.from_numpy(
-            np.random.randn(2 * self.intermediate_size, self.hidden_size).astype('float32') * std
-        ).requires_grad_(True)
+        self.down_proj = (torch.randn(2 * self.intermediate_size, self.hidden_size, dtype=torch.float32) * std).requires_grad_(True)
 
     def __call__(self, x):
         # Fused gate and up projection
@@ -172,9 +164,7 @@ class Qwen3GTModel:
         std = 0.02
 
         # Token embeddings
-        self.embed_tokens = torch.from_numpy(
-            np.random.randn(self.vocab_size, self.hidden_size).astype('float32') * std
-        ).requires_grad_(True)
+        self.embed_tokens = (torch.randn(self.vocab_size, self.hidden_size, dtype=torch.float32) * std).requires_grad_(True)
 
         # Transformer layers
         self.layers = [TransformerBlock(config) for _ in range(self.num_layers)]
@@ -190,9 +180,7 @@ class Qwen3GTModel:
         # Embedding lookup
         # For now, use random embeddings since we don't have gather operation yet
         # TODO: Implement proper gather: embed_tokens[input_ids]
-        hidden_states = torch.from_numpy(
-            np.random.randn(batch_size, seq_len, self.hidden_size).astype('float32') * 0.02
-        )
+        hidden_states = torch.randn(batch_size, seq_len, self.hidden_size, dtype=torch.float32) * 0.02
 
         # Pass through transformer layers
         for layer in self.layers:
@@ -213,9 +201,7 @@ class Qwen3GTForCausalLM:
         self.hidden_size = config['hidden_size']
 
         # LM head (shares weights with embeddings in many models, but separate for clarity)
-        self.lm_head = torch.from_numpy(
-            np.random.randn(self.hidden_size, self.vocab_size).astype('float32') * 0.02
-        ).requires_grad_(True)
+        self.lm_head = (torch.randn(self.hidden_size, self.vocab_size, dtype=torch.float32) * 0.02).requires_grad_(True)
 
     def __call__(self, input_ids):
         # Forward pass through model
