@@ -180,13 +180,21 @@ class HotPathDetector:
         self.sequence_counts: Dict[StreamSignature, int] = {}
         self.hot_sequences: set = set()
 
-        # Current sequence tracking (for matching)
+        # Current sequence tracking (for learning)
         self.current_sequence: List[InstructionSignature] = []
         self.sequence_start_idx = 0
+
+        # Active sequence tracking (for prediction/matching)
+        self.active_hot_sequence: Optional[StreamSignature] = None
+        self.active_position = 0  # Current position in active sequence
 
         # Statistics
         self.total_instructions = 0
         self.hot_instructions_executed = 0
+
+    def _matches_pattern(self, inst: InstructionSignature, pattern: InstructionSignature) -> bool:
+        """Check if instruction matches the pattern (op_type and op_name must match)."""
+        return inst.op_type == pattern.op_type and inst.op_name == pattern.op_name
 
     def record_instruction(
         self,
@@ -198,6 +206,11 @@ class HotPathDetector:
         """
         Record an instruction in the stream.
 
+        STATE MACHINE for predictive buffering:
+        1. If we're matching an active hot sequence, check if this continues the pattern
+        2. If no active sequence, check if this starts a known hot sequence
+        3. Otherwise, record for learning
+
         Args:
             op_type: Type of operation ('binary', 'unary', etc.)
             op_name: Name of operation ('matmul', 'relu', etc.)
@@ -205,24 +218,57 @@ class HotPathDetector:
             input_ids: List of input tensor IDs (order matters!)
 
         Returns:
-            (should_compile, sequence_length) - True if we should compile,
-            and if so, how many upcoming instructions are part of hot sequence
+            (should_compile, sequence_length) - True if we should buffer/compile,
+            and if so, total length of the hot sequence
         """
         self.total_instructions += 1
 
         # Create instruction signature
         inst = InstructionSignature(op_type, op_name, result_id, input_ids)
 
-        # Add to stream
+        # STATE 1: Are we currently matching a hot sequence?
+        if self.active_hot_sequence is not None:
+            expected = self.active_hot_sequence.instructions[self.active_position]
+
+            if self._matches_pattern(inst, expected):
+                # Matches! Continue the sequence
+                self.active_position += 1
+
+                if self.active_position >= self.active_hot_sequence.length:
+                    # Sequence complete! Execute it
+                    seq_length = self.active_hot_sequence.length
+                    debug_print_compile(f"Hot sequence complete: {self.active_hot_sequence}")
+                    self.active_hot_sequence = None
+                    self.active_position = 0
+                    self.hot_instructions_executed += 1
+                    return True, seq_length
+                else:
+                    # Continue buffering
+                    return True, self.active_hot_sequence.length
+            else:
+                # Divergence! Fall back to learning mode
+                debug_print_compile(f"Sequence diverged at position {self.active_position}")
+                self.active_hot_sequence = None
+                self.active_position = 0
+                # Fall through to learning mode
+
+        # STATE 2: Check if this starts a known hot sequence
+        for hot_seq in self.hot_sequences:
+            if hot_seq.length > 0 and self._matches_pattern(inst, hot_seq.instructions[0]):
+                # This starts a hot sequence! Enter matching mode
+                debug_print_compile(f"Starting hot sequence: {hot_seq}")
+                self.active_hot_sequence = hot_seq
+                self.active_position = 1  # We just matched position 0
+                return True, hot_seq.length
+
+        # STATE 3: Learning mode - record sequences for future detection
         self.instruction_stream.append(inst)
         self.current_sequence.append(inst)
 
-        # Check for repeated sequences
+        # Check for repeated sequences (learning)
         if len(self.current_sequence) >= self.min_sequence_length:
-            # Try to match against known patterns
             seq_sig = StreamSignature(self.current_sequence)
 
-            # Check if this matches a known sequence
             if seq_sig in self.sequence_counts:
                 self.sequence_counts[seq_sig] += 1
                 count = self.sequence_counts[seq_sig]
@@ -231,30 +277,22 @@ class HotPathDetector:
                 if count >= self.hot_threshold and seq_sig not in self.hot_sequences:
                     self.hot_sequences.add(seq_sig)
                     debug_print_compile(f"Detected hot sequence after {count} reps: {seq_sig}")
-
-                # If this is a hot sequence, signal compilation
-                if seq_sig in self.hot_sequences:
-                    self.hot_instructions_executed += 1
-                    # Return True and remaining length
-                    remaining = seq_sig.length - len(self.current_sequence)
-                    if remaining <= 0:
-                        # Sequence complete, reset
-                        self.current_sequence = []
-                    return True, seq_sig.length
-
             else:
-                # New sequence, record it
+                # New sequence
                 self.sequence_counts[seq_sig] = 1
 
-            # Sliding window: if sequence gets too long, slide it
+            # Sliding window
             if len(self.current_sequence) > self.window_size // 2:
-                # Start new sequence from midpoint
                 self.current_sequence = self.current_sequence[self.min_sequence_length:]
 
         return False, None
 
     def reset_sequence(self):
         """Reset current sequence tracking (call at sync points)."""
+        # Reset active matching state
+        self.active_hot_sequence = None
+        self.active_position = 0
+
         if self.current_sequence:
             # Record the sequence we just saw
             if len(self.current_sequence) >= self.min_sequence_length:

@@ -1,8 +1,6 @@
-# GT2
+# GT
 
 A distributed multiplexing tensor framework.  Top notch API.
-
-**Designed for AI-assisted development:** This codebase prioritizes clarity, comprehensive documentation, and debugging utilities to enable seamless collaboration between humans and AI coding assistants. See [AI Development](#optimized-for-ai-development) for details.
 
 ## Features
 
@@ -12,6 +10,7 @@ A distributed multiplexing tensor framework.  Top notch API.
 - **Autograd support** - Tape-based automatic differentiation
 - **Distributed execution** - Client-dispatcher-worker architecture
 - **PyTorch-compatible API** - Familiar syntax for tensor operations
+- **AI-assisted development** - Optimized for collaboration with AI coding assistants. See [AI Development](#optimized-for-ai-development)
 
 ## Quick Start
 
@@ -33,7 +32,7 @@ Workers process operations one at a time as they arrive from the dispatcher. Thi
 
 ## Optimized for AI Development
 
-GT2 is designed to be understood, modified, and debugged with AI coding assistants:
+GT is designed to be understood, modified, and debugged with AI coding assistants:
 
 ### 1. **Architecture Documentation for AI**
 - [CLAUDE.md](CLAUDE.md) provides detailed architectural context optimized for Claude and other AI assistants
@@ -224,8 +223,8 @@ This replaces the previous TCP implementation and provides better performance fo
 
 ```bash
 # Clone repository
-git clone https://github.com/bwasti/gt2.git
-cd gt2
+git clone https://github.com/bwasti/gt.git
+cd gt
 
 # Install dependencies
 pip install -r requirements.txt

@@ -114,15 +114,19 @@ class Worker:
             if isinstance(cmd, WorkerGetData):
                 # Flush any buffered operations
                 if self.in_hot_sequence:
+                    debug_print_compile(f"GetData: flushing buffer with {len(self.hot_sequence_buffer)} ops")
                     self._execute_hot_sequence_buffer()
                 if self.hotpath_detector:
                     self.hotpath_detector.reset_sequence()
                 return self._handle_get_data(cmd)
             elif isinstance(cmd, WorkerFreeTensor):
-                # CRITICAL: Don't free tensors while buffering!
-                # The buffer might reference this tensor. Flush first.
+                # During hot sequence buffering, defer FreeTensor - don't flush!
+                # The tensor is still in self.tensors and will be used by buffered ops.
+                # We'll process frees after the sequence completes.
                 if self.in_hot_sequence:
-                    self._execute_hot_sequence_buffer()
+                    debug_print_compile(f"Deferring FreeTensor during hot sequence")
+                    # Just respond success - tensor will be freed eventually
+                    return WorkerResponse(success=True)
                 return self._handle_free_tensor(cmd)
             elif isinstance(cmd, WorkerGetStats):
                 return self._handle_get_stats(cmd)
@@ -143,17 +147,22 @@ class Worker:
 
                 # If inputs not available, flush buffer and execute eagerly
                 if not all_inputs_available:
-                    debug_print_compile("Input missing, flushing buffer and executing eagerly")
+                    debug_print_compile(f"Input missing (need {input_ids}, have {list(self.tensors.keys())[:10]}...), flushing buffer and executing eagerly")
                     self._execute_hot_sequence_buffer()
+                    # Reset hot sequence state
+                    if self.hotpath_detector:
+                        self.hotpath_detector.reset_sequence()
                     # Execute this operation eagerly
                     return self._execute_op_eagerly(cmd)
 
                 # Buffer the operation
                 self.hot_sequence_buffer.append(cmd)
                 self.hot_sequence_remaining -= 1
+                debug_print_compile(f"Buffered operation (buffer_size={len(self.hot_sequence_buffer)}, remaining={self.hot_sequence_remaining})")
 
                 # Execute batch when sequence completes
                 if self.hot_sequence_remaining <= 0:
+                    debug_print_compile(f"Sequence complete, executing buffer of {len(self.hot_sequence_buffer)} ops")
                     self._execute_hot_sequence_buffer()
 
                 return WorkerResponse(success=True)
@@ -248,7 +257,9 @@ class Worker:
         if not self.hot_sequence_buffer:
             return
 
-        debug_print_compile(f"Compiling and executing {len(self.hot_sequence_buffer)} operations")
+        import traceback
+        caller = traceback.extract_stack()[-2]
+        debug_print_compile(f"Compiling and executing {len(self.hot_sequence_buffer)} operations (called from: {caller.name}:{caller.lineno})")
 
         # Convert commands to Operation objects
         operations = []

@@ -6,7 +6,13 @@
       "Bash(python examples/debug_demo.py:*)",
       "Bash(GT_WORKER_BATCH_SIZE=10 python train.py:*)",
       "Bash(python -m cProfile:*)",
-      "Bash(time GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 python examples/train_mlp_gt.py:*)"
+      "Bash(time GT_WORKER_BATCH_SIZE=10 GT_COMPILE=1 python examples/train_mlp_gt.py:*)",
+      "Bash(GT_AUTO_COMPILE=1 GT_DEBUG_COMPILE=1 python:*)",
+      "Bash(GT_DEBUG_DISPATCHER=1 python:*)",
+      "Bash(python:*)",
+      "Bash(GT_VERBOSE=1 python:*)",
+      "Bash(env GT_VERBOSE=1 python -c \"import gt; a = gt.randn(2, 2)\")",
+      "Bash(GT_AUTO_COMPILE=1 python:*)"
     ],
     "deny": [],
     "ask": []
