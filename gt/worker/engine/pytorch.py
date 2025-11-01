@@ -402,25 +402,42 @@ class PyTorchEngine(Engine):
         Returns:
             Dictionary of newly created tensors (result_id -> tensor)
         """
-        if not self.enable_compilation or len(operations) == 1:
-            # Fall back to eager execution for single operations
+        # Minimum batch size for compilation to be worthwhile
+        # Small batches (1-2 ops) have overhead that outweighs compilation benefits
+        MIN_COMPILE_BATCH_SIZE = 3
+
+        if not self.enable_compilation or len(operations) < MIN_COMPILE_BATCH_SIZE:
+            # Fall back to eager execution for small batches
             return self._execute_eager(operations, tensors)
 
-        # Normalize tensor IDs to stable indices for compilation
-        # This allows torch.compile to recognize the same pattern across iterations
+        # Compute graph signature for caching
+        graph_signature = self._compute_graph_signature(operations)
+
+        # Check if we have a cached compiled function
+        if graph_signature in self._compiled_cache:
+            compiled_fn = self._compiled_cache[graph_signature]
+            self._cache_hits += 1
+        else:
+            # Normalize tensor IDs to stable indices for compilation
+            # This allows torch.compile to recognize the same pattern across iterations
+            id_to_index, _, _ = self._normalize_tensor_ids(operations, tensors)
+
+            # Build graph function with normalized indices
+            graph_fn = self._build_normalized_graph_function(operations, id_to_index)
+
+            # Compile with torch.compile
+            try:
+                compiled_fn = self.torch.compile(graph_fn, mode="default")
+                self._compiled_cache[graph_signature] = compiled_fn
+                self._cache_misses += 1
+                debug_print_compile(f"Compiled new graph: {graph_signature} ({len(operations)} ops)")
+            except Exception as e:
+                # Fall back to eager if compilation fails
+                debug_print_compile(f"Warning: Compilation failed ({e}), falling back to eager execution")
+                return self._execute_eager(operations, tensors)
+
+        # Normalize tensors for execution (must do this even for cached functions)
         id_to_index, input_list, result_mapping = self._normalize_tensor_ids(operations, tensors)
-
-        # Build graph function with normalized indices
-        graph_fn = self._build_normalized_graph_function(operations, id_to_index)
-
-        # Compile with torch.compile
-        try:
-            compiled_fn = self.torch.compile(graph_fn, mode="default")
-            self._cache_misses += 1
-        except Exception as e:
-            # Fall back to eager if compilation fails
-            debug_print_compile(f"Warning: Compilation failed ({e}), falling back to eager execution")
-            return self._execute_eager(operations, tensors)
 
         # Execute compiled function with input tensors as a list
         result_list = compiled_fn(input_list)
