@@ -13,7 +13,8 @@ from gt.transport.protocol import (
     ClientCommand, CreateTensor, BinaryOp, UnaryOp, ReshapeOp, GetData, FreeTensor, CopyTensor,
     CompileStart, CompileEnd, GetWorkerStats, RegisterWorker,
     ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp,
-    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
+    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse,
+    serialize, deserialize
 )
 from gt.dispatcher.tensor_handle import TensorHandle
 
@@ -188,7 +189,6 @@ class Dispatcher:
     def _send_to_worker(self, worker, cmd):
         """Send a command to a worker via ROUTER socket."""
         import zmq
-        from gt.transport.protocol import serialize
 
         identity = worker["identity"]
         data = serialize(cmd)
@@ -203,7 +203,6 @@ class Dispatcher:
     def _recv_from_worker(self, worker):
         """Receive a response from a worker (blocking)."""
         import zmq
-        from gt.transport.protocol import deserialize
 
         # In ROUTER mode, we need to receive from the socket and match by identity
         # This is a simplified version - in production would need proper matching
@@ -238,7 +237,6 @@ class Dispatcher:
                 recv_size = len(data)
 
                 # Deserialize command
-                from gt.transport.protocol import deserialize, serialize
                 cmd = deserialize(data)
 
                 # Use identity as client ID
@@ -338,7 +336,27 @@ class Dispatcher:
         # Pick a worker (simple round-robin)
         worker = self._pick_worker()
         if not worker:
-            return ClientResponse(success=False, error="No workers available")
+            error_msg = f"""
+
+======================================================================
+GT DISPATCHER ERROR: No workers available
+======================================================================
+The dispatcher has no connected workers to execute operations.
+
+Solutions:
+  1. If using auto-start: This is a bug - workers should be
+     automatically started. Please report this issue.
+
+  2. If using manual setup:
+     - Start at least one worker with:
+       python -m gt.worker --host <dispatcher_host> -p <port>
+
+  3. Check if workers disconnected (check worker logs)
+
+Current registered workers: {len(self.workers)}
+======================================================================
+"""
+            return ClientResponse(success=False, error=error_msg)
 
         # Create worker-local tensor ID
         worker_tensor_id = f"{client_id}_{cmd.tensor_id}"
@@ -443,7 +461,27 @@ class Dispatcher:
             # Single worker or non-shardable - use old logic
             worker = self._pick_worker()
             if not worker:
-                return ClientResponse(success=False, error="No workers available")
+                error_msg = f"""
+
+======================================================================
+GT DISPATCHER ERROR: No workers available
+======================================================================
+The dispatcher has no connected workers to execute operations.
+
+Solutions:
+  1. If using auto-start: This is a bug - workers should be
+     automatically started. Please report this issue.
+
+  2. If using manual setup:
+     - Start at least one worker with:
+       python -m gt.worker --host <dispatcher_host> -p <port>
+
+  3. Check if workers disconnected (check worker logs)
+
+Current registered workers: {len(self.workers)}
+======================================================================
+"""
+                return ClientResponse(success=False, error=error_msg)
 
             result_tensor_id = f"{client_id}_{cmd.result_id}"
 

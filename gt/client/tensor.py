@@ -302,7 +302,24 @@ def _binary_op(op: str, left, right) -> Tensor:
     import numpy as np
 
     if _client_connection is None:
-        raise RuntimeError("Not connected to dispatcher")
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
 
     # Convert scalars to tensors
     if not isinstance(left, Tensor):
@@ -458,7 +475,24 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
     from gt.client.autograd import get_graph
 
     if _client_connection is None:
-        raise RuntimeError("Not connected to dispatcher")
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
 
     requires_grad = input_tensor.requires_grad
 
@@ -565,7 +599,24 @@ def _reshape_op(op: str, input_tensor: Tensor, params: tuple) -> Tensor:
     import numpy as np
 
     if _client_connection is None:
-        raise RuntimeError("Not connected to dispatcher")
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
 
     requires_grad = input_tensor.requires_grad
 
@@ -655,7 +706,24 @@ def _reduce_op(op: str, input_tensor: Tensor, axis=None, keepdims=False) -> Tens
     import numpy as np
 
     if _client_connection is None:
-        raise RuntimeError("Not connected to dispatcher")
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
 
     requires_grad = input_tensor.requires_grad
 
@@ -771,7 +839,24 @@ def from_numpy(array: np.ndarray, requires_grad: bool = False) -> Tensor:
     from gt.transport.protocol import CreateTensor, ClientResponse
 
     if _client_connection is None:
-        raise RuntimeError("Not connected to dispatcher")
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
 
     tensor = Tensor(shape=array.shape, dtype=str(array.dtype), requires_grad=requires_grad)
 
@@ -804,7 +889,24 @@ def randn(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
     from gt.transport.protocol import UnaryOp, ClientResponse
 
     if _client_connection is None:
-        raise RuntimeError("Not connected to dispatcher")
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
 
     tensor = Tensor(shape=shape, dtype=dtype, requires_grad=requires_grad)
 
@@ -838,7 +940,24 @@ def zeros(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
     from gt.transport.protocol import UnaryOp, ClientResponse
 
     if _client_connection is None:
-        raise RuntimeError("Not connected to dispatcher")
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
 
     tensor = Tensor(shape=shape, dtype=dtype, requires_grad=requires_grad)
 

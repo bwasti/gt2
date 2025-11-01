@@ -17,7 +17,7 @@ class Operation:
     op_name: str  # 'add', 'matmul', 'relu', etc.
     result_id: str
     input_ids: List[str]
-    params: Dict[str, Any]  # Shape, dtype, etc.
+    params: Optional[Dict[str, Any]] = None  # Shape, dtype, etc. (optional)
 
 
 class Engine(ABC):

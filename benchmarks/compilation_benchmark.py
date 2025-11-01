@@ -24,6 +24,21 @@ def benchmark_workload(name, workload_fn, num_iterations=100, warmup=5):
     - Warmup time (includes compilation overhead)
     - Steady-state time (amortized cost)
     """
+    # Cleanup any existing GT system before reimport
+    if 'gt' in sys.modules:
+        import gt
+        gt._cleanup()
+        # Wait for cleanup to complete
+        time.sleep(0.5)
+
+    # Clear cached workload state (model, data) to avoid stale references
+    if hasattr(workload_fn, 'model'):
+        delattr(workload_fn, 'model')
+    if hasattr(workload_fn, 'data'):
+        delattr(workload_fn, 'data')
+    if hasattr(workload_fn, 'target'):
+        delattr(workload_fn, 'target')
+
     # Force reimport for clean config
     for mod in list(sys.modules.keys()):
         if mod.startswith('gt'):
@@ -42,10 +57,6 @@ def benchmark_workload(name, workload_fn, num_iterations=100, warmup=5):
     for i in range(warmup, num_iterations):
         workload_fn(i)
     steady_time = time.time() - steady_start
-
-    # Cleanup
-    if hasattr(gt, '_connection') and gt._connection:
-        gt._connection.close()
 
     return {
         'warmup_total': warmup_time,
@@ -217,15 +228,17 @@ def run_benchmarks():
         print(f"{'=' * 80}")
 
         # Test without compilation
-        print("\n[1/2] WITHOUT compilation (GT_COMPILE=0)...")
-        os.environ['GT_COMPILE'] = '0'
+        print("\n[1/2] WITHOUT compilation (GT_AUTO_COMPILE=0)...")
+        os.environ['GT_AUTO_COMPILE'] = '0'
         results_no_compile = benchmark_workload(
             workload_name, workload_fn, num_iters, warmup
         )
 
         # Test with compilation
-        print("[2/2] WITH compilation (GT_COMPILE=1)...")
-        os.environ['GT_COMPILE'] = '1'
+        print("[2/2] WITH compilation (GT_AUTO_COMPILE=1)...")
+        os.environ['GT_AUTO_COMPILE'] = '1'
+        os.environ['GT_HOTPATH_THRESHOLD'] = '5'  # Trigger after 5 repetitions
+        os.environ['GT_HOTPATH_MIN_SEQ'] = '3'    # Detect sequences of 3+ ops
         results_compile = benchmark_workload(
             workload_name, workload_fn, num_iters, warmup
         )

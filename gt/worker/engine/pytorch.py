@@ -157,10 +157,12 @@ class PyTorchEngine(Engine):
                         raise ValueError(f"Unknown binary op: {op.op_name}")
 
                 elif op.op_type == 'unary':
-                    # Check results first (for intermediate tensors), then tensor_dict
-                    input_tensor = results.get(op.input_ids[0])
-                    if input_tensor is None:
-                        input_tensor = tensor_dict.get(op.input_ids[0])
+                    # Get input tensor (if operation has inputs)
+                    input_tensor = None
+                    if op.input_ids:
+                        input_tensor = results.get(op.input_ids[0])
+                        if input_tensor is None:
+                            input_tensor = tensor_dict.get(op.input_ids[0])
 
                     if op.op_name == 'relu':
                         results[op.result_id] = self.torch.relu(input_tensor)
@@ -174,24 +176,41 @@ class PyTorchEngine(Engine):
                         results[op.result_id] = self.torch.log(input_tensor)
                     elif op.op_name == 'sum':
                         # Use axis and keepdims from params
-                        axis = op.params.get('axis', None)
-                        keepdims = op.params.get('keepdims', False)
+                        params = op.params or {}
+                        axis = params.get('axis', None)
+                        keepdims = params.get('keepdims', False)
                         results[op.result_id] = self.sum(input_tensor, axis=axis, keepdims=keepdims)
                     elif op.op_name == 'mean':
-                        axis = op.params.get('axis', None)
-                        keepdims = op.params.get('keepdims', False)
+                        params = op.params or {}
+                        axis = params.get('axis', None)
+                        keepdims = params.get('keepdims', False)
                         results[op.result_id] = self.mean(input_tensor, axis=axis, keepdims=keepdims)
                     elif op.op_name == 'transpose':
                         results[op.result_id] = self.torch.transpose(input_tensor, -2, -1)
                     elif op.op_name == 'sqrt':
                         results[op.result_id] = self.torch.sqrt(input_tensor)
+                    elif op.op_name == 'zeros':
+                        # Creation operation - get shape and dtype from params
+                        params = op.params or {}
+                        shape = params.get('shape', ())
+                        dtype = params.get('dtype', 'float32')
+                        results[op.result_id] = self.zeros(shape, dtype)
+                    elif op.op_name == 'randn':
+                        # Creation operation - get shape and dtype from params
+                        params = op.params or {}
+                        shape = params.get('shape', ())
+                        dtype = params.get('dtype', 'float32')
+                        results[op.result_id] = self.randn(shape, dtype)
                     else:
                         raise ValueError(f"Unknown unary op: {op.op_name}")
 
                 # Update tensor_dict with new results for subsequent operations
                 tensor_dict[op.result_id] = results[op.result_id]
 
-            return results
+            # Return full tensor_dict, not just results
+            # This ensures ALL intermediates are visible, including ones that
+            # might be needed by future operations (like backward pass)
+            return tensor_dict
 
         return graph_fn
 
@@ -257,7 +276,10 @@ class PyTorchEngine(Engine):
                 tensors[op.result_id] = result
 
             elif op.op_type == 'unary':
-                input_tensor = tensors.get(op.input_ids[0])
+                # Get input tensor (if operation has inputs)
+                input_tensor = None
+                if op.input_ids:
+                    input_tensor = tensors.get(op.input_ids[0])
 
                 if op.op_name == 'relu':
                     result = self.relu(input_tensor)
@@ -282,13 +304,27 @@ class PyTorchEngine(Engine):
                     result = self.transpose(input_tensor)
                 elif op.op_name == 'sqrt':
                     result = self.sqrt(input_tensor)
+                elif op.op_name == 'zeros':
+                    # Creation operation - get shape and dtype from params
+                    params = op.params or {}
+                    shape = params.get('shape', ())
+                    dtype = params.get('dtype', 'float32')
+                    result = self.zeros(shape, dtype)
+                elif op.op_name == 'randn':
+                    # Creation operation - get shape and dtype from params
+                    params = op.params or {}
+                    shape = params.get('shape', ())
+                    dtype = params.get('dtype', 'float32')
+                    result = self.randn(shape, dtype)
                 else:
                     raise ValueError(f"Unknown unary op: {op.op_name}")
 
                 results[op.result_id] = result
                 tensors[op.result_id] = result
 
-        return results
+        # Return full tensors dict for consistency with compiled path
+        # This ensures ALL intermediates are visible to future operations
+        return tensors
 
     def get_compilation_stats(self) -> Dict[str, int]:
         """Get compilation cache statistics."""
