@@ -96,9 +96,10 @@ def _ensure_connected():
     # Auto-start local server
     import time
     import os
+    from gt.debug import verbose_print
     start_time = time.time()
     num_workers = _num_gpu_workers
-    print(f"GT: Auto-starting local server with {num_workers} worker(s)...")
+    verbose_print(f"GT: Auto-starting local server with {num_workers} worker(s)...")
     from gt.dispatcher.dispatcher import Dispatcher
     from gt.worker.worker import Worker
     from gt.transport.connection import create_server, Connection
@@ -106,12 +107,12 @@ def _ensure_connected():
     # Check for instruction log file from environment variable
     log_file = os.environ.get('GT_INSTRUCTION_LOG', None)
     if log_file:
-        print(f"GT: Instruction stream logging to: {log_file}")
+        verbose_print(f"GT: Instruction stream logging to: {log_file}")
 
     # Check for config file from environment variable
     config_file = os.environ.get('GT_CONFIG', None)
     if config_file:
-        print(f"GT: Loading sharding config from: {config_file}")
+        verbose_print(f"GT: Loading sharding config from: {config_file}")
         from gt.config import load_config as _load_config
         _load_config(config_file)
 
@@ -121,7 +122,7 @@ def _ensure_connected():
     # Create dispatcher with ZMQ ROUTER
     dispatcher = Dispatcher(host='localhost', port=actual_port, log_file=log_file, console_log=False)
     t1 = time.time()
-    print(f"GT: Dispatcher created on port {actual_port} ({(t1-start_time)*1000:.1f}ms)")
+    verbose_print(f"GT: Dispatcher created on port {actual_port} ({(t1-start_time)*1000:.1f}ms)")
 
     # Start dispatcher in background thread
     dispatcher_thread = threading.Thread(target=dispatcher.start, daemon=True)
@@ -132,7 +133,7 @@ def _ensure_connected():
 
     # Start N workers in threads immediately
     t2 = time.time()
-    print(f"GT: Spawning {num_workers} worker(s)... ({(t2-t1)*1000:.1f}ms)")
+    verbose_print(f"GT: Spawning {num_workers} worker(s)... ({(t2-t1)*1000:.1f}ms)")
     worker_threads = []
     for i in range(num_workers):
         def make_run_worker(worker_id, gpu_id):
@@ -169,8 +170,8 @@ def _ensure_connected():
     # Give workers time to start and register
     time.sleep(1.5)
     t3 = time.time()
-    print(f"GT: Workers started ({(t3-t2)*1000:.1f}ms)")
-    print(f"GT: Registered workers: {len(dispatcher.workers)}")
+    verbose_print(f"GT: Workers started ({(t3-t2)*1000:.1f}ms)")
+    verbose_print(f"GT: Registered workers: {len(dispatcher.workers)}")
 
     # Connect client
     from gt.client.client import Client
@@ -180,7 +181,7 @@ def _ensure_connected():
     _auto_server = dispatcher
 
     t4 = time.time()
-    print(f"GT: Ready! Total startup time: {(t4-start_time)*1000:.1f}ms")
+    verbose_print(f"GT: Ready! Total startup time: {(t4-start_time)*1000:.1f}ms")
 
 
 def tensor(data: Union[List, np.ndarray], dtype: str = 'float32', requires_grad: bool = False):

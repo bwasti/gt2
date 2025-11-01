@@ -5,10 +5,58 @@ Provides visibility into:
 - Autograd tape
 - Worker compilation statistics
 - Operation flow
+
+Environment variables for debug output:
+- GT_VERBOSE: Framework status messages (startup, connections, registration)
+- GT_DEBUG_CLIENT: Client-side debug prints
+- GT_DEBUG_DISPATCHER: Dispatcher debug prints
+- GT_DEBUG_WORKER: Worker debug prints
+- GT_DEBUG_COMPILE: Compilation/hot path debug prints
+
+By default, GT is completely silent (no framework output). Only errors are shown.
 """
 
+import os
 from typing import List, Dict, Any
 from gt.client.autograd import get_graph
+
+
+# Debug flags
+DEBUG_CLIENT = os.environ.get('GT_DEBUG_CLIENT', '0') == '1'
+DEBUG_DISPATCHER = os.environ.get('GT_DEBUG_DISPATCHER', '0') == '1'
+DEBUG_WORKER = os.environ.get('GT_DEBUG_WORKER', '0') == '1'
+DEBUG_COMPILE = os.environ.get('GT_DEBUG_COMPILE', '0') == '1'
+VERBOSE = os.environ.get('GT_VERBOSE', '0') == '1'
+
+
+def debug_print_client(*args, **kwargs):
+    """Print client debug message if GT_DEBUG_CLIENT=1."""
+    if DEBUG_CLIENT:
+        print("[CLIENT]", *args, **kwargs)
+
+
+def debug_print_dispatcher(*args, **kwargs):
+    """Print dispatcher debug message if GT_DEBUG_DISPATCHER=1."""
+    if DEBUG_DISPATCHER:
+        print("[DISPATCHER]", *args, **kwargs)
+
+
+def debug_print_worker(*args, **kwargs):
+    """Print worker debug message if GT_DEBUG_WORKER=1."""
+    if DEBUG_WORKER:
+        print("[WORKER]", *args, **kwargs)
+
+
+def debug_print_compile(*args, **kwargs):
+    """Print compilation debug message if GT_DEBUG_COMPILE=1."""
+    if DEBUG_COMPILE:
+        print("[COMPILE]", *args, **kwargs)
+
+
+def verbose_print(*args, **kwargs):
+    """Print verbose framework message if GT_VERBOSE=1."""
+    if VERBOSE:
+        print(*args, **kwargs)
 
 
 def get_tape() -> List[Dict[str, Any]]:

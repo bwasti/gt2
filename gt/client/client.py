@@ -5,6 +5,7 @@ Keep this SIMPLE and READABLE.
 """
 
 from gt.transport.connection import connect
+from gt.debug import verbose_print
 import gt.client.tensor as tensor_module
 
 
@@ -21,7 +22,7 @@ class Client:
         self.connection = connect(self.host, self.port)
         # Set global connection in tensor module
         tensor_module._client_connection = self.connection
-        print(f"Connected to dispatcher at {self.host}:{self.port}")
+        verbose_print(f"Connected to dispatcher at {self.host}:{self.port}")
 
     def disconnect(self):
         """Disconnect from the dispatcher."""
@@ -29,4 +30,4 @@ class Client:
             self.connection.close()
             self.connection = None
             tensor_module._client_connection = None
-        print("Disconnected from dispatcher")
+        verbose_print("Disconnected from dispatcher")

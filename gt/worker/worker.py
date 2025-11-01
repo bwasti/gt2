@@ -11,11 +11,12 @@ import numpy as np
 from typing import List, Dict, Any
 from gt.transport.connection import connect, Connection
 from gt.transport.protocol import (
-    WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp,
+    WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
     WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
 )
 from gt.worker.engine import create_engine, Engine, Operation
 from gt.worker.hotpath_detector import HotPathDetector
+from gt.debug import debug_print_worker, debug_print_compile
 
 
 class Worker:
@@ -63,26 +64,26 @@ class Worker:
                 hot_threshold=hot_threshold,
                 min_sequence_length=min_seq_length,
             )
-            print(f"Worker {self.worker_id}: Hot path compilation enabled (threshold={hot_threshold})")
+            debug_print_compile(f"Worker {self.worker_id}: Hot path compilation enabled (threshold={hot_threshold})")
         else:
-            print(f"Worker {self.worker_id}: Stream processing mode")
+            debug_print_worker(f"Worker {self.worker_id}: Stream processing mode")
 
     def connect_to_dispatcher(self, dispatcher_host="localhost", dispatcher_port=9000):
         """Connect to dispatcher and start processing."""
         from gt.transport.protocol import RegisterWorker
 
         self.conn = connect(dispatcher_host, dispatcher_port)
-        print(f"Worker {self.worker_id} connected to dispatcher")
+        debug_print_worker(f"Worker {self.worker_id} connected to dispatcher")
 
         # Register with dispatcher
         reg_cmd = RegisterWorker(worker_id=self.worker_id)
         self.conn.send(reg_cmd)
         reg_response = self.conn.recv()
         if not reg_response.success:
-            print(f"Worker {self.worker_id} failed to register: {reg_response.error}")
+            print(f"Worker {self.worker_id} failed to register: {reg_response.error}")  # Keep error visible
             return
 
-        print(f"Worker {self.worker_id} registered successfully")
+        debug_print_worker(f"Worker {self.worker_id} registered successfully")
 
         # Process commands
         while True:
@@ -91,7 +92,7 @@ class Worker:
                 response = self._process_command(cmd)
                 self.conn.send(response)
             except Exception as e:
-                print(f"Worker {self.worker_id} error: {e}")
+                print(f"Worker {self.worker_id} error: {e}")  # Keep errors visible
                 break
 
     def _process_command(self, cmd: WorkerCommand) -> WorkerResponse:
@@ -107,7 +108,7 @@ class Worker:
                     self.in_hot_sequence = True
                     self.hot_sequence_remaining = seq_length
                     self.hot_sequence_buffer = []
-                    print(f"[HotPath] Starting hot sequence (length={seq_length})")
+                    debug_print_compile(f"Starting hot sequence (length={seq_length})")
 
             # Sync operations always flush and execute immediately
             if isinstance(cmd, WorkerGetData):
@@ -142,7 +143,7 @@ class Worker:
 
                 # If inputs not available, flush buffer and execute eagerly
                 if not all_inputs_available:
-                    print(f"[HotPath] Input missing, flushing buffer and executing eagerly")
+                    debug_print_compile("Input missing, flushing buffer and executing eagerly")
                     self._execute_hot_sequence_buffer()
                     # Execute this operation eagerly
                     return self._execute_op_eagerly(cmd)
@@ -164,6 +165,8 @@ class Worker:
                 return self._handle_unary_op(cmd)
             elif isinstance(cmd, WorkerReshapeOp):
                 return self._handle_reshape_op(cmd)
+            elif isinstance(cmd, WorkerSliceOp):
+                return self._handle_slice_op(cmd)
             else:
                 return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
 
@@ -175,7 +178,7 @@ class Worker:
 
     def _is_compute_op(self, cmd: WorkerCommand) -> bool:
         """Check if command is a compute operation (vs control/data ops)."""
-        return isinstance(cmd, (WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp))
+        return isinstance(cmd, (WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp))
 
     def _get_input_ids(self, cmd: WorkerCommand) -> list:
         """Get input tensor IDs from a command."""
@@ -184,6 +187,8 @@ class Worker:
         elif isinstance(cmd, WorkerUnaryOp):
             return [cmd.input_id] if cmd.input_id else []
         elif isinstance(cmd, WorkerReshapeOp):
+            return [cmd.input_id]
+        elif isinstance(cmd, WorkerSliceOp):
             return [cmd.input_id]
         return []
 
@@ -201,6 +206,8 @@ class Worker:
             return self._handle_unary_op(cmd)
         elif isinstance(cmd, WorkerReshapeOp):
             return self._handle_reshape_op(cmd)
+        elif isinstance(cmd, WorkerSliceOp):
+            return self._handle_slice_op(cmd)
         return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
 
     def _record_in_hotpath_detector(self, cmd: WorkerCommand):
@@ -227,6 +234,13 @@ class Worker:
                 result_id=cmd.result_id,
                 input_ids=[cmd.input_id]
             )
+        elif isinstance(cmd, WorkerSliceOp):
+            return self.hotpath_detector.record_instruction(
+                'slice',
+                'subscript',  # Generic name for slice operations
+                result_id=cmd.result_id,
+                input_ids=[cmd.input_id]
+            )
         return False, None
 
     def _execute_hot_sequence_buffer(self):
@@ -234,7 +248,7 @@ class Worker:
         if not self.hot_sequence_buffer:
             return
 
-        print(f"[HotPath] Compiling and executing {len(self.hot_sequence_buffer)} operations")
+        debug_print_compile(f"Compiling and executing {len(self.hot_sequence_buffer)} operations")
 
         # Convert commands to Operation objects
         operations = []
@@ -282,10 +296,10 @@ class Worker:
                 self.tensors[tensor_id] = tensor_value
 
             self.stats['operations']['compiled'] += len(operations)
-            print(f"[HotPath] Successfully compiled {len(operations)} ops")
+            debug_print_compile(f"Successfully compiled {len(operations)} ops")
 
         except Exception as e:
-            print(f"[HotPath] Compilation failed, falling back to eager: {e}")
+            debug_print_compile(f"Compilation failed, falling back to eager: {e}")
             # Fall back to eager execution
             for cmd in self.hot_sequence_buffer:
                 if isinstance(cmd, WorkerBinaryOp):
@@ -294,6 +308,8 @@ class Worker:
                     self._handle_unary_op(cmd)
                 elif isinstance(cmd, WorkerReshapeOp):
                     self._handle_reshape_op(cmd)
+                elif isinstance(cmd, WorkerSliceOp):
+                    self._handle_slice_op(cmd)
 
             self.stats['operations']['eager'] += len(operations)
 
@@ -436,6 +452,24 @@ class Worker:
                     result = np.squeeze(input_tensor, axis=dim)
         else:
             return WorkerResponse(success=False, error=f"Unknown reshape op: {cmd.op}")
+
+        self.tensors[cmd.result_id] = result
+        return WorkerResponse(success=True)
+
+    def _handle_slice_op(self, cmd: WorkerSliceOp) -> WorkerResponse:
+        """Execute slice operation (tensor subscripting)."""
+        self.stats['operations']['total'] += 1
+
+        if cmd.input_id not in self.tensors:
+            return WorkerResponse(success=False, error="Input tensor not found")
+
+        input_tensor = self.tensors[cmd.input_id]
+
+        # Execute slice operation - Python slicing works the same for PyTorch/NumPy
+        try:
+            result = input_tensor[cmd.key]
+        except Exception as e:
+            return WorkerResponse(success=False, error=f"Slice operation failed: {e}")
 
         self.tensors[cmd.result_id] = result
         return WorkerResponse(success=True)

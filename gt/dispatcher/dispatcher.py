@@ -9,10 +9,11 @@ Keep this SIMPLE and READABLE.
 import threading
 import time
 from gt.transport.connection import create_server, Connection
+from gt.debug import debug_print_dispatcher
 from gt.transport.protocol import (
-    ClientCommand, CreateTensor, BinaryOp, UnaryOp, ReshapeOp, GetData, FreeTensor, CopyTensor,
+    ClientCommand, CreateTensor, BinaryOp, UnaryOp, ReshapeOp, SliceOp, GetData, FreeTensor, CopyTensor,
     CompileStart, CompileEnd, GetWorkerStats, RegisterWorker,
-    ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp,
+    ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
     WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse,
     serialize, deserialize
 )
@@ -184,7 +185,7 @@ class Dispatcher:
             "id": worker_id,
             "identity": worker_identity
         })
-        print(f"Worker {worker_id} registered")
+        debug_print_dispatcher(f"Worker {worker_id} registered")
 
     def _send_to_worker(self, worker, cmd):
         """Send a command to a worker via ROUTER socket."""
@@ -224,7 +225,8 @@ class Dispatcher:
 
         # Determine endpoint type for logging
         transport = "IPC" if self.host in ('localhost', '127.0.0.1', '0.0.0.0') else "TCP"
-        print(f"Dispatcher listening on {self.host}:{self.port} ({transport})")
+        from gt.debug import verbose_print
+        verbose_print(f"Dispatcher listening on {self.host}:{self.port} ({transport})")
 
         while self.running:
             try:
@@ -268,7 +270,7 @@ class Dispatcher:
 
             except Exception as e:
                 if self.running:
-                    print(f"Error processing message: {e}")
+                    print(f"Error processing message: {e}")  # Keep errors visible
                     import traceback
                     traceback.print_exc()
 
@@ -282,7 +284,7 @@ class Dispatcher:
 
     def _handle_client(self, conn: Connection, client_id: str):
         """Handle a client connection."""
-        print(f"Handling client {client_id}")
+        debug_print_dispatcher(f"Handling client {client_id}")
         self.instruction_stream.log("CONNECT", client_id, "CLIENT", "")
 
         try:
@@ -297,11 +299,11 @@ class Dispatcher:
                 conn.send(response)
         except Exception as e:
             self.instruction_stream.log("ERROR", client_id, "EXCEPTION", str(e))
-            print(f"Client {client_id} error: {e}")
+            print(f"Client {client_id} error: {e}")  # Keep errors visible
         finally:
             conn.close()
             self.instruction_stream.log("DISCONNECT", client_id, "CLIENT", "")
-            print(f"Client {client_id} disconnected")
+            debug_print_dispatcher(f"Client {client_id} disconnected")
 
     def _process_command(self, cmd: ClientCommand, client_id: str) -> ClientResponse:
         """Process a command from a client."""
@@ -314,6 +316,8 @@ class Dispatcher:
                 return self._handle_unary_op(cmd, client_id)
             elif isinstance(cmd, ReshapeOp):
                 return self._handle_reshape_op(cmd, client_id)
+            elif isinstance(cmd, SliceOp):
+                return self._handle_slice_op(cmd, client_id)
             elif isinstance(cmd, GetData):
                 return self._handle_get_data(cmd, client_id)
             elif isinstance(cmd, FreeTensor):
@@ -555,6 +559,51 @@ Current registered workers: {len(self.workers)}
             worker_id=worker["id"],
             worker_tensor_id=result_tensor_id,
             shape=input_loc.shape,  # Placeholder
+            dtype=input_loc.dtype
+        )
+
+        return ClientResponse(success=True)
+
+    def _handle_slice_op(self, cmd: SliceOp, client_id: str) -> ClientResponse:
+        """Handle slice operation (subscripting)."""
+        # Get location of input tensor
+        input_locs = self.tensor_handles.get_locations(client_id, cmd.input_id)
+        if not input_locs:
+            return ClientResponse(success=False, error="Input tensor not found")
+
+        # For now, only support non-sharded tensors
+        # TODO: Handle sharded tensors (would need to slice each shard appropriately)
+        if len(input_locs) > 1:
+            return ClientResponse(success=False, error="Slice on sharded tensors not yet supported")
+
+        input_loc = input_locs[0]
+        worker = self._get_worker(input_loc.worker_id)
+        if not worker:
+            return ClientResponse(success=False, error="Worker not found")
+
+        result_tensor_id = f"{client_id}_{cmd.result_id}"
+
+        worker_cmd = WorkerSliceOp(
+            result_id=result_tensor_id,
+            input_id=input_loc.worker_tensor_id,
+            key=cmd.key
+        )
+        send_size = self._send_to_worker(worker, worker_cmd)
+        self._log_worker_cmd(worker["id"], "WorkerSliceOp", f"key={cmd.key}", size_bytes=send_size)
+        worker_response, recv_size = self._recv_from_worker(worker)
+        self._log_worker_response(worker["id"], "WorkerSliceOp", worker_response.success, size_bytes=recv_size)
+
+        if not worker_response.success:
+            return ClientResponse(success=False, error=worker_response.error)
+
+        # For now, register with None shape (will be computed properly later or fetched on demand)
+        # TODO: Compute actual result shape based on slice key
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_tensor_id,
+            shape=None,  # Could compute from input_loc.shape and cmd.key
             dtype=input_loc.dtype
         )
 

@@ -62,6 +62,15 @@ class ReshapeOp(ClientCommand):
 
 
 @dataclass
+class SliceOp(ClientCommand):
+    """Slice operation: result = input[key]."""
+    result_id: int
+    input_id: int
+    key: tuple  # Serialized slice key (can be tuple of slice objects, ints, None, Ellipsis)
+    signal: Optional[str] = None  # Signal name for sharding config
+
+
+@dataclass
 class GetData(ClientCommand):
     """Request data for a tensor."""
     tensor_id: int
@@ -176,6 +185,14 @@ class WorkerReshapeOp(WorkerCommand):
     op: str  # "reshape", "unsqueeze", "squeeze"
     input_id: str
     params: tuple  # reshape: new_shape, unsqueeze: (dim,), squeeze: () or (dim,)
+
+
+@dataclass
+class WorkerSliceOp(WorkerCommand):
+    """Execute slice operation on worker."""
+    result_id: str
+    input_id: str
+    key: tuple  # Serialized slice key
 
 
 @dataclass

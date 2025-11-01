@@ -9,6 +9,7 @@ import numpy as np
 import hashlib
 from typing import Optional, List, Dict, Any, Callable
 from .base import Engine, Operation
+from gt.debug import debug_print_compile
 
 
 class PyTorchEngine(Engine):
@@ -241,7 +242,7 @@ class PyTorchEngine(Engine):
             self._cache_misses += 1
         except Exception as e:
             # Fall back to eager if compilation fails
-            print(f"Warning: Compilation failed ({e}), falling back to eager execution")
+            debug_print_compile(f"Warning: Compilation failed ({e}), falling back to eager execution")
             return self._execute_eager(operations, tensors)
 
         # Execute compiled function

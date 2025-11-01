@@ -100,7 +100,38 @@ class Tensor:
         return self._grad
 
     def __repr__(self):
-        return f"Tensor(id={self.id}, shape={self.shape}, dtype={self.dtype})"
+        """PyTorch-style repr showing shape, dtype, and data."""
+        try:
+            # Try to fetch a small preview of the data
+            data = self.data.numpy()
+
+            # Format similar to PyTorch
+            dtype_str = f"dtype={self.dtype}" if self.dtype else ""
+            shape_str = f"shape={self.shape}" if self.shape else ""
+
+            # Use numpy's repr but clean it up
+            data_str = np.array2string(data, threshold=10, edgeitems=3,
+                                       precision=4, suppress_small=True)
+
+            return f"tensor({data_str}, {dtype_str})" if dtype_str else f"tensor({data_str})"
+        except:
+            # Fallback if data fetch fails
+            return f"Tensor(id={self.id}, shape={self.shape}, dtype={self.dtype})"
+
+    def __str__(self):
+        return self.__repr__()
+
+    def __getitem__(self, key):
+        """
+        Subscript/slice the tensor: a[:4, :4] or a[0] or a[1:3, :]
+
+        Supports:
+        - Single indices: a[0]
+        - Slices: a[1:5], a[:10], a[::2]
+        - Multi-dimensional: a[:4, :4], a[0, :], a[:, 1]
+        - Ellipsis: a[..., 0]
+        """
+        return _slice_op(self, key)
 
     # Binary operations
     def __add__(self, other):
@@ -588,6 +619,88 @@ Solutions:
                 raise RuntimeError(f"Gradient not implemented for {op}")
 
         graph.record(result, [input_tensor], grad_fn)
+
+    return result
+
+
+def _compute_slice_shape(input_shape: tuple, key: tuple) -> tuple:
+    """Compute output shape from input shape and slice key."""
+    import numpy as np
+
+    if not input_shape:
+        return ()
+
+    # Create a dummy array with the input shape to compute output shape
+    try:
+        dummy = np.empty(input_shape)
+        sliced = dummy[key]
+        return sliced.shape
+    except:
+        # If shape computation fails, return None to defer to runtime
+        return None
+
+
+def _slice_op(input_tensor: Tensor, key) -> Tensor:
+    """
+    Execute a slicing/subscript operation remotely.
+
+    Converts Python slice notation to serializable format and
+    executes on the worker side (100% remote).
+
+    Args:
+        input_tensor: Input tensor to slice
+        key: Index/slice expression (int, slice, tuple of slices, etc.)
+
+    Returns:
+        New tensor representing the sliced view
+    """
+    from gt.transport.protocol import SliceOp, ClientResponse
+
+    if _client_connection is None:
+        raise RuntimeError("""
+
+======================================================================
+GT ERROR: Not connected to dispatcher
+======================================================================
+You need to connect to a GT dispatcher before creating tensors.
+
+Solutions:
+  1. Auto-start (easiest): Just use gt.randn() or gt.tensor()
+     GT will automatically start a local server.
+
+  2. Manual connection: gt.connect('localhost:12345')
+     (Make sure dispatcher is running first)
+
+  3. Check if your connection was closed or if you're in a
+     subprocess/thread without a connection.
+======================================================================
+""")
+
+    # Normalize key to tuple format for serialization
+    if not isinstance(key, tuple):
+        key = (key,)
+
+    result = Tensor()
+
+    # Get current signal scope
+    from gt.signal import current_signal
+    signal_name = current_signal()
+
+    cmd = SliceOp(result_id=result.id, input_id=input_tensor.id, key=key, signal=signal_name)
+
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
+
+    if not response.success:
+        raise RuntimeError(f"Slice operation failed: {response.error}")
+
+    # Compute result shape from input shape and slice key
+    result.shape = _compute_slice_shape(input_tensor.shape, key)
+    result.dtype = input_tensor.dtype
 
     return result
 

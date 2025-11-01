@@ -22,6 +22,7 @@ from typing import List, Dict, Optional, Tuple, Set
 from collections import deque
 import hashlib
 import time
+from gt.debug import debug_print_compile
 
 
 class InstructionSignature:
@@ -229,7 +230,7 @@ class HotPathDetector:
                 # Mark as hot if threshold reached
                 if count >= self.hot_threshold and seq_sig not in self.hot_sequences:
                     self.hot_sequences.add(seq_sig)
-                    print(f"[HotPath] Detected hot sequence after {count} reps: {seq_sig}")
+                    debug_print_compile(f"Detected hot sequence after {count} reps: {seq_sig}")
 
                 # If this is a hot sequence, signal compilation
                 if seq_sig in self.hot_sequences:

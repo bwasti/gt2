@@ -222,6 +222,36 @@ pytest tests/ -v
 
 This automatically starts a test GT system on a different port and runs comprehensive numeric tests.
 
+### Debug Output
+
+GT provides fine-grained control over debug output through environment variables:
+
+```bash
+# Enable worker debug output
+GT_DEBUG_WORKER=1 python my_script.py
+
+# Enable dispatcher debug output
+GT_DEBUG_DISPATCHER=1 python my_script.py
+
+# Enable client debug output
+GT_DEBUG_CLIENT=1 python my_script.py
+
+# Enable compilation/hot path debug output
+GT_DEBUG_COMPILE=1 python my_script.py
+
+# Combine multiple flags
+GT_DEBUG_WORKER=1 GT_DEBUG_COMPILE=1 python my_script.py
+```
+
+**Available Flags:**
+- `GT_VERBOSE=1` - Enable framework status messages (startup, connections, registration)
+- `GT_DEBUG_CLIENT=1` - Client-side debug messages (tensor operations, connections)
+- `GT_DEBUG_DISPATCHER=1` - Dispatcher debug messages (worker registration, client handling)
+- `GT_DEBUG_WORKER=1` - Worker debug messages (command processing, registration)
+- `GT_DEBUG_COMPILE=1` - Compilation debug messages (hot path detection, compilation progress)
+
+**Note:** By default, GT is completely silent - no framework output at all. Only errors are shown. Use `GT_VERBOSE=1` to see startup and connection messages.
+
 ## Communication Flow
 
 1. Client connects to dispatcher via TCP
