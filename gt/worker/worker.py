@@ -286,6 +286,14 @@ class Worker:
                     input_ids=[cmd.input_id],
                     params=cmd.params
                 ))
+            elif isinstance(cmd, WorkerSliceOp):
+                operations.append(Operation(
+                    op_type='slice',
+                    op_name='subscript',
+                    result_id=cmd.result_id,
+                    input_ids=[cmd.input_id],
+                    params=cmd.key
+                ))
 
         # Execute as compiled batch
         try:
