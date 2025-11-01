@@ -197,4 +197,18 @@ def print_worker_stats():
             ops = worker_stats['operations']
             print(f"  Operations:")
             print(f"    Total:        {ops.get('total', 0)}")
-            print(f"    Batched:      {ops.get('batched', 0)}")
+            print(f"    Compiled:     {ops.get('compiled', 0)}")
+            print(f"    Eager:        {ops.get('eager', 0)}")
+
+        if 'hotpath' in worker_stats:
+            hp = worker_stats['hotpath']
+            print(f"  Hot Path Detection:")
+            print(f"    Total instructions:  {hp.get('total_instructions', 0)}")
+            print(f"    Hot instructions:    {hp.get('hot_instructions', 0)}")
+            print(f"    Unique sequences:    {hp.get('unique_sequences', 0)}")
+            print(f"    Hot sequences:       {hp.get('hot_sequences', 0)}")
+            print(f"    Detection threshold: {hp.get('hot_threshold', 0)}")
+            if hp.get('top_sequences'):
+                print(f"  Top sequences:")
+                for seq, count in hp['top_sequences'][:3]:
+                    print(f"    - {seq}: {count} repetitions")

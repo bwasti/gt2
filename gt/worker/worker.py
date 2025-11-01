@@ -521,4 +521,8 @@ class Worker:
         if self.hotpath_detector:
             stats['hotpath'] = self.hotpath_detector.get_stats()
 
+        # Add compilation stats from engine
+        if hasattr(self.engine, 'get_compilation_stats'):
+            stats['compilation'] = self.engine.get_compilation_stats()
+
         return WorkerResponse(success=True, data=stats)

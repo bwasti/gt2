@@ -279,6 +279,10 @@ class PyTorchEngine(Engine):
 
         def graph_fn(input_tensors: list) -> list:
             """Execute the operation graph with indexed tensors."""
+            # Mark input list size as dynamic to avoid recompilation
+            # Different batches may have different numbers of external inputs
+            self.torch._dynamo.mark_dynamic(input_tensors, 0)
+
             # tensor_storage holds all tensors by index (inputs + intermediates)
             tensor_storage = list(input_tensors)  # Copy inputs
 
