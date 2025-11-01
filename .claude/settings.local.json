@@ -12,7 +12,8 @@
       "Bash(python:*)",
       "Bash(GT_VERBOSE=1 python:*)",
       "Bash(env GT_VERBOSE=1 python -c \"import gt; a = gt.randn(2, 2)\")",
-      "Bash(GT_AUTO_COMPILE=1 python:*)"
+      "Bash(GT_AUTO_COMPILE=1 python:*)",
+      "Bash(TORCH_LOGS=recompiles GT_AUTO_COMPILE=1 python:*)"
     ],
     "deny": [],
     "ask": []

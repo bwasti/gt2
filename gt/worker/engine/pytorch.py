@@ -279,10 +279,6 @@ class PyTorchEngine(Engine):
 
         def graph_fn(input_tensors: list) -> list:
             """Execute the operation graph with indexed tensors."""
-            # Mark input list size as dynamic to avoid recompilation
-            # Different batches may have different numbers of external inputs
-            self.torch._dynamo.mark_dynamic(input_tensors, 0)
-
             # tensor_storage holds all tensors by index (inputs + intermediates)
             tensor_storage = list(input_tensors)  # Copy inputs
 
@@ -414,19 +410,21 @@ class PyTorchEngine(Engine):
             # Fall back to eager execution for small batches
             return self._execute_eager(operations, tensors)
 
-        # Compute graph signature for caching
-        graph_signature = self._compute_graph_signature(operations)
+        # First normalize to determine number of external inputs
+        id_to_index, input_list, result_mapping = self._normalize_tensor_ids(operations, tensors)
+        num_inputs = len(input_list)
+
+        # Compute graph signature including input count
+        # Same operations with different input counts need different compiled functions
+        base_signature = self._compute_graph_signature(operations)
+        graph_signature = f"{base_signature}:inputs={num_inputs}"
 
         # Check if we have a cached compiled function
         if graph_signature in self._compiled_cache:
             compiled_fn = self._compiled_cache[graph_signature]
             self._cache_hits += 1
         else:
-            # Normalize tensor IDs to stable indices for compilation
-            # This allows torch.compile to recognize the same pattern across iterations
-            id_to_index, _, _ = self._normalize_tensor_ids(operations, tensors)
-
-            # Build graph function with normalized indices
+            # Build graph function with normalized indices (id_to_index already computed above)
             graph_fn = self._build_normalized_graph_function(operations, id_to_index)
 
             # Compile with torch.compile
@@ -440,10 +438,8 @@ class PyTorchEngine(Engine):
                 debug_print_compile(f"Warning: Compilation failed ({e}), falling back to eager execution")
                 return self._execute_eager(operations, tensors)
 
-        # Normalize tensors for execution (must do this even for cached functions)
-        id_to_index, input_list, result_mapping = self._normalize_tensor_ids(operations, tensors)
-
         # Execute compiled function with input tensors as a list
+        # (input_list and result_mapping already computed above)
         result_list = compiled_fn(input_list)
 
         # Map results back to original tensor IDs
