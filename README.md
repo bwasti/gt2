@@ -2,6 +2,11 @@
 
 A distributed multiplexing tensor framework.  Top notch API.
 
+```bash
+pip install "git+https://github.com/bwasti/gt.git#egg=gt[all,viz]"
+python -c 'import gt; print(gt.randn(2,2))'
+```
+
 ## Features
 
 - **High-performance transport** - ZeroMQ (ZMQ) with automatic message batching and efficient DEALER/ROUTER pattern
