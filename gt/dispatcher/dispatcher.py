@@ -706,7 +706,7 @@ Current registered workers: {len(self.workers)}
 
                 worker_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
                 self._send_to_worker(worker, worker_cmd)
-                worker_response: WorkerResponse = self._recv_from_worker(worker)
+                worker_response, _ = self._recv_from_worker(worker)
 
                 if not worker_response.success:
                     return ClientResponse(success=False, error=worker_response.error)
@@ -835,8 +835,8 @@ Current registered workers: {len(self.workers)}
 
             # Fetch B data
             get_cmd = WorkerGetData(tensor_id=right_loc.worker_tensor_id)
-            right_self._send_to_worker(worker, get_cmd)
-            right_response: WorkerResponse = right_self._recv_from_worker(worker)
+            self._send_to_worker(worker, get_cmd)
+            right_response, _ = self._recv_from_worker(worker)
             if not right_response.success:
                 return ClientResponse(success=False, error="Failed to get B data")
 
@@ -848,7 +848,7 @@ Current registered workers: {len(self.workers)}
                 shape=right_loc.shape
             )
             self._send_to_worker(worker, create_b_cmd)
-            create_response: WorkerResponse = self._recv_from_worker(worker)
+            create_response, _ = self._recv_from_worker(worker)
             if not create_response.success:
                 return ClientResponse(success=False, error="Failed to create B copy")
 
@@ -862,7 +862,7 @@ Current registered workers: {len(self.workers)}
                 right_id=b_copy_id
             )
             self._send_to_worker(worker, matmul_cmd)
-            matmul_response: WorkerResponse = self._recv_from_worker(worker)
+            matmul_response, _ = self._recv_from_worker(worker)
 
             if not matmul_response.success:
                 return ClientResponse(success=False, error=f"Matmul failed on worker {left_loc.worker_id}")
@@ -916,7 +916,7 @@ Current registered workers: {len(self.workers)}
                 input_id=loc.worker_tensor_id
             )
             self._send_to_worker(worker, worker_cmd)
-            worker_response: WorkerResponse = self._recv_from_worker(worker)
+            worker_response, _ = self._recv_from_worker(worker)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=worker_response.error)
@@ -925,7 +925,7 @@ Current registered workers: {len(self.workers)}
             from gt.transport.protocol import WorkerGetData
             get_cmd = WorkerGetData(tensor_id=result_tensor_id)
             self._send_to_worker(worker, get_cmd)
-            get_response: WorkerResponse = self._recv_from_worker(worker)
+            get_response, _ = self._recv_from_worker(worker)
 
             if not get_response.success:
                 return ClientResponse(success=False, error=get_response.error)
@@ -963,8 +963,8 @@ Current registered workers: {len(self.workers)}
             dtype=input_locs[0].dtype,
             shape=result_data.shape
         )
-        first_self._send_to_worker(worker, create_cmd)
-        worker_response: WorkerResponse = first_self._recv_from_worker(worker)
+        self._send_to_worker(worker, create_cmd)
+        worker_response, _ = self._recv_from_worker(worker)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
@@ -1010,7 +1010,7 @@ Current registered workers: {len(self.workers)}
                 dtype=cmd.dtype
             )
             self._send_to_worker(worker, worker_cmd)
-            worker_response: WorkerResponse = self._recv_from_worker(worker)
+            worker_response, _ = self._recv_from_worker(worker)
 
             if not worker_response.success:
                 return ClientResponse(success=False, error=worker_response.error)
