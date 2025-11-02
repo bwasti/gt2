@@ -835,8 +835,8 @@ Current registered workers: {len(self.workers)}
 
             # Fetch B data
             get_cmd = WorkerGetData(tensor_id=right_loc.worker_tensor_id)
-            self._send_to_worker(worker, get_cmd)
-            right_response, _ = self._recv_from_worker(worker)
+            self._send_to_worker(right_worker, get_cmd)
+            right_response, _ = self._recv_from_worker(right_worker)
             if not right_response.success:
                 return ClientResponse(success=False, error="Failed to get B data")
 
