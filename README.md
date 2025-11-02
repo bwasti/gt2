@@ -7,13 +7,26 @@ pip install git+https://github.com/bwasti/gt.git
 python -c 'import gt; print(gt.randn(2,2))'
 ```
 
+## General Ideas
+
+- **Three components**
+    - N x clients (as many users as you want!)
+    - 1 x dispatcher (for coordinating)
+    - N x workers (1 per GPU)
+- **Everything communicates with a stream of instructions**
+   - Clients deal with math.  They emit (GPU-unaware) pure functional instructions
+   - The dispatcher rewrites these instructions on the fly to be GPU-aware and sends them to the workers
+   - Workers asyncronously process these instructions, optionally JIT compiling
+- **Instruction streams are annotated**
+   - Clients can send "signals" which allow the dispatcher to more appropriately shard the tensors
+   - Dispatchers annotate "hot" paths to give hints to workers about JIT compiling
+   - Annotations are supplemented with YAML configs that specify sharding and compilation information
+   - Every annotation can be safely ignored, so the same code can run anywhere (just remove the YAML)
+
 ## Features
 
 - **High-performance transport** - ZeroMQ (ZMQ) with automatic message batching and efficient DEALER/ROUTER pattern
-- **Stream processing** - Workers process operations one at a time for simplicity
-- **Signal-based sharding** - Configure data/model/pipeline parallelism via YAML
-- **Autograd support** - Tape-based automatic differentiation
-- **Distributed execution** - Client-dispatcher-worker architecture
+- **Autograd support** - Tape-based automatic differentiation exclusively at the client layer
 - **PyTorch-compatible API** - Familiar syntax for tensor operations
 - **AI-assisted development** - Optimized for collaboration with AI coding assistants. See [AI Development](#optimized-for-ai-development)
 
