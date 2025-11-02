@@ -103,11 +103,15 @@ Column Details:
             # Broadcast to monitoring clients (non-blocking)
             if self.monitor_socket:
                 try:
+                    import zmq
                     import json
                     msg = json.dumps(entry).encode('utf-8')
-                    self.monitor_socket.send(msg, flags=1)  # NOBLOCK flag
-                except Exception:
-                    pass  # Don't crash dispatcher if broadcast fails
+                    self.monitor_socket.send(msg, flags=zmq.NOBLOCK)
+                except Exception as e:
+                    # Debug: print first error only to avoid spam
+                    if not hasattr(self, '_broadcast_error_shown'):
+                        print(f"Warning: Monitor broadcast failed: {e}")
+                        self._broadcast_error_shown = True
 
     def _format_log_entry(self, entry: dict) -> str:
         """Format a log entry for output."""
