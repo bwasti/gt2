@@ -23,7 +23,7 @@ from gt.dispatcher.tensor_handle import TensorHandle
 class InstructionStream:
     """Records all client-dispatcher-worker instructions with timestamps for debugging and monitoring."""
 
-    def __init__(self, log_file: str = None, console: bool = True):
+    def __init__(self, log_file: str = None, console: bool = True, monitor_socket=None):
         self.entries = []
         self.lock = threading.Lock()
         self.start_time = time.time()
@@ -31,6 +31,7 @@ class InstructionStream:
         self.console = console
         self.log_file = log_file
         self.file_handle = None
+        self.monitor_socket = monitor_socket  # ZMQ PUB socket for live monitoring
 
         # Open log file if specified
         if self.log_file:
@@ -98,6 +99,15 @@ Column Details:
             if self.file_handle:
                 self.file_handle.write(log_line + "\n")
                 self.file_handle.flush()
+
+            # Broadcast to monitoring clients (non-blocking)
+            if self.monitor_socket:
+                try:
+                    import json
+                    msg = json.dumps(entry).encode('utf-8')
+                    self.monitor_socket.send(msg, flags=1)  # NOBLOCK flag
+                except Exception:
+                    pass  # Don't crash dispatcher if broadcast fails
 
     def _format_log_entry(self, entry: dict) -> str:
         """Format a log entry for output."""
@@ -169,7 +179,7 @@ class Dispatcher:
     Takes commands from clients and schedules them to workers.
     """
 
-    def __init__(self, host="localhost", port=9000, log_file: str = None, console_log: bool = True, enable_sharding: bool = False):
+    def __init__(self, host="localhost", port=9000, log_file: str = None, console_log: bool = True, enable_sharding: bool = False, enable_monitoring: bool = True):
         self.host = host
         self.port = port
         self.tensor_handles = TensorHandle()
@@ -177,7 +187,21 @@ class Dispatcher:
         self.next_worker_idx = 0  # Simple round-robin scheduling
         self.running = False
         self.server_socket = None
-        self.instruction_stream = InstructionStream(log_file=log_file, console=console_log)  # Record all instructions for debugging/monitoring
+        self.monitor_socket = None
+
+        # Create monitoring PUB socket (non-blocking broadcasts)
+        if enable_monitoring:
+            try:
+                import zmq
+                context = zmq.Context()
+                self.monitor_socket = context.socket(zmq.PUB)
+                monitor_port = port + 1
+                self.monitor_socket.bind(f"tcp://{host}:{monitor_port}")
+            except Exception as e:
+                print(f"Warning: Could not create monitoring socket: {e}")
+                self.monitor_socket = None
+
+        self.instruction_stream = InstructionStream(log_file=log_file, console=console_log, monitor_socket=self.monitor_socket)  # Record all instructions for debugging/monitoring
 
         # Stream modifiers
         from gt.dispatcher.sharding_modifier import ShardingStreamModifier

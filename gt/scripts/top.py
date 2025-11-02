@@ -2,44 +2,38 @@
 """
 GT Worker Monitor - Real-time htop-style worker activity visualization
 
-Monitors worker activity from instruction tape log and displays:
-- Per-worker operation breakdown (matmul, add, etc.)
-- Idle time percentage
-- EMA-smoothed percentages for stable display
-- Color-coded progress bars
+Monitors worker activity by subscribing to dispatcher's event stream.
+No log files needed - connects directly to running dispatcher.
 
 Usage:
     # Auto-attach to running dispatcher
     python -m gt.scripts.top
 
-    # Attach to specific process
-    python -m gt.scripts.top --pid 12345
-
-    # Monitor specific log file
-    python -m gt.scripts.top /path/to/tape.log
+    # Attach to specific port
+    python -m gt.scripts.top --port 9000
 """
 
 import sys
 import time
 import re
 import os
-from collections import defaultdict
+import json
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import argparse
 
 try:
-    import psutil
+    import zmq
 except ImportError:
-    psutil = None
+    print("Error: 'pyzmq' library required")
+    print("Install with: pip install pyzmq")
+    sys.exit(1)
 
 try:
     from rich.live import Live
     from rich.console import Console
     from rich.table import Table
-    from rich.progress import Progress, BarColumn, TextColumn
-    from rich.panel import Panel
-    from rich.layout import Layout
     from rich import box
 except ImportError:
     print("Error: 'rich' library required for monitor")
@@ -56,14 +50,15 @@ class WorkerStats:
     op_times: Dict[str, float] = field(default_factory=lambda: defaultdict(float))
     last_event_time: Optional[float] = None
     last_event_type: Optional[str] = None
+    pending_op_start: Optional[float] = None  # When WORKER_SEND happened
 
     # EMA smoothed percentages
     ema_percentages: Dict[str, float] = field(default_factory=lambda: defaultdict(float))
     ema_idle: float = 0.0
 
 
-class TapeMonitor:
-    """Real-time tape log monitor."""
+class RealtimeMonitor:
+    """Real-time monitor that subscribes to dispatcher events."""
 
     # EMA alpha (0-1, higher = more responsive, lower = smoother)
     EMA_ALPHA = 0.15
@@ -86,102 +81,105 @@ class TapeMonitor:
         'idle': 'white',
     }
 
-    LINE_PATTERN = re.compile(
-        r'\s*(?P<timestamp>[\d.]+)s\s*\|\s*#(?P<inst_id>\d+)\s*\|\s*'
-        r'(?P<event>\S+)\s*\|\s*(?P<source>[^|]+?)\s*\|\s*'
-        r'(?P<msg_type>[^|]+?)\s*\|'
-    )
-
-    def __init__(self, log_path: str, window_seconds: float = 2.0):
-        self.log_path = log_path
+    def __init__(self, host: str, port: int, window_seconds: float = 2.0):
+        self.host = host
+        self.port = port
+        self.monitor_port = port + 1  # Monitor socket is dispatcher_port + 1
         self.window_seconds = window_seconds
         self.workers: Dict[str, WorkerStats] = {}
-        self.start_time = None
-        self.last_update = None
+        self.event_window = deque()  # Rolling window of events
 
-    def parse_line(self, line: str) -> Optional[tuple]:
-        """Parse log line and return (timestamp, worker_name, event_type, msg_type)."""
-        match = self.LINE_PATTERN.match(line)
-        if not match:
-            return None
+        # ZMQ SUB socket
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.SUB)
+        self.socket.setsockopt(zmq.SUBSCRIBE, b'')  # Subscribe to all messages
+        self.socket.setsockopt(zmq.RCVTIMEO, 100)  # 100ms timeout
 
-        timestamp = float(match.group('timestamp'))
-        event = match.group('event').strip()
-        source = match.group('source').strip()
-        msg_type = match.group('msg_type').strip()
+    def connect(self):
+        """Connect to dispatcher monitoring socket."""
+        monitor_url = f"tcp://{self.host}:{self.monitor_port}"
+        self.socket.connect(monitor_url)
+        return monitor_url
 
-        # Extract worker name
-        worker_match = re.search(r'(worker_\d+|\w*worker\w*)', source.lower())
-        if not worker_match:
-            return None
+    def _extract_op_type(self, command: str) -> str:
+        """Extract operation type from command."""
+        cmd_lower = command.lower()
 
-        worker_name = worker_match.group(0)
-
-        # Extract operation type
-        op_type = self._extract_op_type(msg_type)
-
-        return timestamp, worker_name, event, op_type
-
-    def _extract_op_type(self, msg_type: str) -> str:
-        """Extract operation type from message type."""
-        msg_lower = msg_type.lower()
-
-        # Check for specific operations
-        if 'matmul' in msg_lower:
+        if 'matmul' in cmd_lower:
             return 'matmul'
-        elif 'binaryop' in msg_lower or 'add' in msg_lower:
+        elif 'binaryop' in cmd_lower or 'add' in cmd_lower:
             return 'add'
-        elif 'sub' in msg_lower:
+        elif 'sub' in cmd_lower:
             return 'sub'
-        elif 'mul' in msg_lower:
+        elif 'mul' in cmd_lower:
             return 'mul'
-        elif 'div' in msg_lower:
+        elif 'div' in cmd_lower:
             return 'div'
-        elif 'relu' in msg_lower:
+        elif 'relu' in cmd_lower:
             return 'relu'
-        elif 'sigmoid' in msg_lower:
+        elif 'sigmoid' in cmd_lower:
             return 'sigmoid'
-        elif 'tanh' in msg_lower:
+        elif 'tanh' in cmd_lower:
             return 'tanh'
-        elif 'sum' in msg_lower:
+        elif 'sum' in cmd_lower:
             return 'sum'
-        elif 'mean' in msg_lower:
+        elif 'mean' in cmd_lower:
             return 'mean'
-        elif 'transpose' in msg_lower:
+        elif 'transpose' in cmd_lower:
             return 'transpose'
-        elif 'getdata' in msg_lower:
+        elif 'getdata' in cmd_lower:
             return 'getdata'
-        elif 'allgather' in msg_lower:
+        elif 'allgather' in cmd_lower:
             return 'allgather'
         else:
             return 'other'
 
-    def update_worker_stats(self, timestamp: float, worker_name: str, event: str, op_type: str):
+    def _extract_worker_name(self, client: str) -> Optional[str]:
+        """Extract worker name from client ID."""
+        match = re.search(r'(worker_\d+|\w*worker\w*)', client.lower())
+        return match.group(0) if match else None
+
+    def update_worker_stats(self, event: dict):
         """Update worker statistics with new event."""
+        timestamp = event['timestamp']
+        event_type = event['event']
+        client = event['client']
+        command = event['command']
+
+        # Extract worker name
+        worker_name = self._extract_worker_name(client)
+        if not worker_name:
+            return
+
+        # Extract operation type
+        op_type = self._extract_op_type(command)
+
+        # Initialize worker if needed
         if worker_name not in self.workers:
             self.workers[worker_name] = WorkerStats(name=worker_name)
 
         worker = self.workers[worker_name]
 
-        if worker.last_event_time is not None:
-            # Calculate time since last event
-            elapsed = timestamp - worker.last_event_time
-
-            # Attribute time to previous operation or idle
-            if worker.last_event_type and event == 'WORKER_RECV':
-                # Time from WORKER_SEND to WORKER_RECV is operation time
-                worker.op_times[worker.last_event_type] += elapsed
-                worker.total_time += elapsed
-            else:
-                # Other gaps are idle time
-                worker.idle_time += elapsed
-                worker.total_time += elapsed
-
-        # Update state
-        if event == 'WORKER_SEND':
+        # Track operation timing
+        if event_type == 'WORKER_SEND':
+            # Operation starts
+            worker.pending_op_start = timestamp
             worker.last_event_type = op_type
+        elif event_type == 'WORKER_RECV':
+            # Operation completes
+            if worker.pending_op_start and worker.last_event_type:
+                duration = timestamp - worker.pending_op_start
+                worker.op_times[worker.last_event_type] += duration
+                worker.total_time += duration
+                worker.pending_op_start = None
+            worker.last_event_time = timestamp
 
-        worker.last_event_time = timestamp
+        # Track idle time between operations
+        if worker.last_event_time and event_type == 'WORKER_SEND':
+            idle_duration = timestamp - worker.last_event_time
+            if idle_duration > 0:
+                worker.idle_time += idle_duration
+                worker.total_time += idle_duration
 
     def compute_percentages(self):
         """Compute and smooth percentages using EMA."""
@@ -219,15 +217,19 @@ class TapeMonitor:
     def generate_display(self) -> Table:
         """Generate rich table for display."""
         table = Table(
-            title="GT Worker Monitor",
+            title=f"GT Worker Monitor - {self.host}:{self.port}",
             box=box.ROUNDED,
             show_header=True,
             header_style="bold cyan"
         )
 
-        table.add_column("Worker", style="cyan", no_wrap=True)
-        table.add_column("Activity", style="white")
-        table.add_column("Details", style="dim")
+        table.add_column("Worker", style="cyan", no_wrap=True, width=15)
+        table.add_column("Activity", style="white", width=50)
+        table.add_column("Details", style="dim", width=40)
+
+        if not self.workers:
+            table.add_row("No workers", "", "Waiting for events...")
+            return table
 
         # Sort workers by name
         sorted_workers = sorted(self.workers.values(), key=lambda w: w.name)
@@ -288,133 +290,67 @@ class TapeMonitor:
 
         return " | ".join(details)
 
-    def follow_log(self):
-        """Follow log file like 'tail -f'."""
+    def monitor(self):
+        """Main monitoring loop."""
         console = Console()
+        monitor_url = self.connect()
+
+        console.print(f"[cyan]GT Worker Monitor[/cyan]")
+        console.print(f"Connected to: {monitor_url}")
+        console.print("Press Ctrl+C to stop\n")
 
         try:
-            with open(self.log_path, 'r') as f:
-                # Skip header
-                for line in f:
-                    if line.strip() and not line.startswith('=') and not line.startswith('This log'):
-                        if self.LINE_PATTERN.match(line):
-                            break
+            with Live(self.generate_display(), refresh_per_second=4, console=console) as live:
+                while True:
+                    try:
+                        # Receive event (non-blocking with timeout)
+                        msg = self.socket.recv()
+                        event = json.loads(msg.decode('utf-8'))
 
-                # Initial parse of existing data
-                for line in f:
-                    parsed = self.parse_line(line)
-                    if parsed:
-                        timestamp, worker_name, event, op_type = parsed
-                        self.update_worker_stats(timestamp, worker_name, event, op_type)
+                        # Update stats
+                        self.update_worker_stats(event)
 
-                self.compute_percentages()
+                    except zmq.Again:
+                        # Timeout - no message received
+                        pass
+                    except Exception as e:
+                        # Parsing error, skip
+                        pass
 
-                # Live update loop
-                with Live(self.generate_display(), refresh_per_second=4, console=console) as live:
-                    while True:
-                        line = f.readline()
+                    # Update display
+                    self.compute_percentages()
+                    live.update(self.generate_display())
 
-                        if line:
-                            parsed = self.parse_line(line)
-                            if parsed:
-                                timestamp, worker_name, event, op_type = parsed
-                                self.update_worker_stats(timestamp, worker_name, event, op_type)
-                        else:
-                            time.sleep(0.1)
-
-                        # Update display
-                        self.compute_percentages()
-                        live.update(self.generate_display())
-
-        except FileNotFoundError:
-            console.print(f"[red]Error: Log file not found: {self.log_path}[/red]")
-            console.print("\nMake sure to run your workload with:")
-            console.print(f"  GT_INSTRUCTION_LOG={self.log_path} python your_script.py")
-            sys.exit(1)
         except KeyboardInterrupt:
             console.print("\n[yellow]Monitoring stopped[/yellow]")
+        finally:
+            self.socket.close()
+            self.context.term()
 
 
-def find_dispatcher_processes():
-    """Find running dispatcher processes."""
-    if psutil is None:
-        return []
-
-    dispatchers = []
-    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        try:
-            cmdline = proc.info.get('cmdline', [])
-            if cmdline and any('dispatcher' in arg.lower() or 'gt.server' in arg for arg in cmdline):
-                dispatchers.append(proc)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-
-    return dispatchers
-
-
-def get_log_path_from_process(proc):
-    """Get GT_INSTRUCTION_LOG path from process environment."""
+def find_dispatcher_port():
+    """Try to find dispatcher port from running processes."""
     try:
-        env = proc.environ()
-        return env.get('GT_INSTRUCTION_LOG')
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return None
+        import psutil
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info.get('cmdline', [])
+                if cmdline and any('dispatcher' in arg.lower() or 'gt.server' in arg for arg in cmdline):
+                    # Look for -p or --port flag
+                    for i, arg in enumerate(cmdline):
+                        if arg in ['-p', '--port'] and i + 1 < len(cmdline):
+                            try:
+                                return int(cmdline[i + 1])
+                            except ValueError:
+                                pass
+                    # Default port
+                    return 9000
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except ImportError:
+        pass
 
-
-def find_log_path(pid=None):
-    """Find log path from running dispatcher."""
-    console = Console()
-
-    if psutil is None:
-        console.print("[yellow]Warning: psutil not installed, cannot auto-detect dispatcher[/yellow]")
-        console.print("Install with: pip install psutil")
-        return None
-
-    if pid:
-        # Attach to specific PID
-        try:
-            proc = psutil.Process(pid)
-            log_path = get_log_path_from_process(proc)
-            if log_path:
-                console.print(f"[green]Found log at: {log_path}[/green]")
-                return log_path
-            else:
-                console.print(f"[yellow]Process {pid} has no GT_INSTRUCTION_LOG set[/yellow]")
-                return None
-        except psutil.NoSuchProcess:
-            console.print(f"[red]Process {pid} not found[/red]")
-            return None
-    else:
-        # Find dispatcher automatically
-        dispatchers = find_dispatcher_processes()
-
-        if not dispatchers:
-            console.print("[yellow]No running dispatcher found[/yellow]")
-            console.print("\nTo monitor a dispatcher, start it with instruction logging:")
-            console.print("  GT_INSTRUCTION_LOG=/tmp/gt.log python -m gt.server -p 12345")
-            return None
-
-        if len(dispatchers) == 1:
-            proc = dispatchers[0]
-            log_path = get_log_path_from_process(proc)
-            if log_path:
-                console.print(f"[green]Attached to dispatcher (PID {proc.pid})[/green]")
-                console.print(f"[green]Log: {log_path}[/green]")
-                return log_path
-            else:
-                console.print(f"[yellow]Dispatcher (PID {proc.pid}) has no GT_INSTRUCTION_LOG set[/yellow]")
-                console.print("\nRestart dispatcher with:")
-                console.print("  GT_INSTRUCTION_LOG=/tmp/gt.log python -m gt.server -p 12345")
-                return None
-        else:
-            console.print(f"[yellow]Found {len(dispatchers)} dispatchers:[/yellow]")
-            for proc in dispatchers:
-                log_path = get_log_path_from_process(proc)
-                status = f"log={log_path}" if log_path else "no log"
-                console.print(f"  PID {proc.pid}: {status}")
-            console.print("\nSpecify which to monitor:")
-            console.print("  python -m gt.scripts.top --pid <PID>")
-            return None
+    return None
 
 
 def main():
@@ -423,14 +359,14 @@ def main():
         description="GT Worker Monitor - Real-time worker activity visualization"
     )
     parser.add_argument(
-        "log_path",
-        nargs='?',
-        help="Path to GT instruction log file (optional, auto-detects if omitted)"
+        "--host",
+        default="localhost",
+        help="Dispatcher host (default: localhost)"
     )
     parser.add_argument(
-        "--pid",
+        "--port",
         type=int,
-        help="Attach to specific dispatcher process ID"
+        help="Dispatcher port (default: auto-detect or 9000)"
     )
     parser.add_argument(
         "--ema-alpha",
@@ -443,22 +379,27 @@ def main():
 
     console = Console()
 
-    # Determine log path
-    log_path = args.log_path
-    if not log_path:
-        log_path = find_log_path(args.pid)
-        if not log_path:
-            sys.exit(1)
+    # Determine port
+    port = args.port
+    if not port:
+        port = find_dispatcher_port()
+        if port:
+            console.print(f"[green]Auto-detected dispatcher on port {port}[/green]")
+        else:
+            port = 9000
+            console.print(f"[yellow]Using default port {port}[/yellow]")
 
     # Start monitoring
-    monitor = TapeMonitor(log_path)
+    monitor = RealtimeMonitor(args.host, port)
     monitor.EMA_ALPHA = args.ema_alpha
 
-    console.print("[cyan]GT Worker Monitor[/cyan]")
-    console.print(f"Monitoring: {log_path}")
-    console.print("Press Ctrl+C to stop\n")
-
-    monitor.follow_log()
+    try:
+        monitor.monitor()
+    except zmq.ZMQError as e:
+        console.print(f"\n[red]Error connecting to dispatcher: {e}[/red]")
+        console.print(f"\nMake sure dispatcher is running:")
+        console.print(f"  python -m gt.server -p {port}")
+        sys.exit(1)
 
 
 if __name__ == '__main__':
