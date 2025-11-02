@@ -8,6 +8,7 @@ Some engines support instruction batching and compilation (PyTorch).
 from .base import Engine, Operation
 from .numpy import NumpyEngine
 from .pytorch import PyTorchEngine
+from .pytorch_compile import PyTorchCompileEngine
 
 
 def create_engine(backend: str = 'numpy', enable_compilation: bool = False) -> Engine:
@@ -24,9 +25,12 @@ def create_engine(backend: str = 'numpy', enable_compilation: bool = False) -> E
     if backend == 'numpy':
         return NumpyEngine()
     elif backend == 'pytorch':
-        return PyTorchEngine(enable_compilation=enable_compilation)
+        if enable_compilation:
+            return PyTorchCompileEngine()
+        else:
+            return PyTorchEngine()
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
 
-__all__ = ['Engine', 'Operation', 'NumpyEngine', 'PyTorchEngine', 'create_engine']
+__all__ = ['Engine', 'Operation', 'NumpyEngine', 'PyTorchEngine', 'PyTorchCompileEngine', 'create_engine']
