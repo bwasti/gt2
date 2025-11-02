@@ -377,7 +377,7 @@ class RealtimeMonitor:
                         # Timeout - no message received
                         pass
                     except Exception as e:
-                        # Parsing error, skip
+                        # Ignore parsing errors
                         pass
 
                     # Update display

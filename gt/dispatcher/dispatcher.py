@@ -913,7 +913,6 @@ Current registered workers: {len(self.workers)}
         import numpy as np
 
         # Step 1: All-gather B - collect all shards from workers
-        print(f"All-gathering B tensor (sharded across {len(right_locs)} workers)")
         b_shards = []
         for loc in right_locs:
             worker = self._get_worker(loc.worker_id)
@@ -931,7 +930,6 @@ Current registered workers: {len(self.workers)}
 
         # Concatenate B shards to get full B (shards are on axis 0)
         b_full = np.concatenate(b_shards, axis=0)
-        print(f"All-gathered B: shape={b_full.shape}")
 
         # Step 2: Distribute full B to each worker and compute A_shard @ B_full
         for shard_idx, left_loc in enumerate(left_locs):
