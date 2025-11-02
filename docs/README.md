@@ -4,7 +4,7 @@ Welcome to GT - a multiplexing tensor framework for distributed GPU computing.
 
 ## What is GT?
 
-GT is a distributed frontend for GPU ML operations that multiplexes users to work on the same cluster simultaneously. It automatically shards and places tensors, schedules operations to maximize GPU utilization.
+GT is a distributed frontend for GPU ML operations that multiplexes clients to work on the same cluster simultaneously.
 
 ```bash
 pip install git+https://github.com/bwasti/gt.git
