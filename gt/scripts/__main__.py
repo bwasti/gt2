@@ -15,10 +15,12 @@ if __name__ == '__main__':
         print("GT Scripts")
         print("\nAvailable commands:")
         print("  visualize <tape_log_path>  - Visualize instruction tape timeline")
-        print("  top [--pid PID]            - Real-time worker monitoring (htop-style)")
+        print("  top [--port PORT]          - Real-time worker monitoring (htop-style)")
+        print("  trace -s SECONDS           - Capture instruction stream to log file")
         print("\nUsage:")
         print("  python -m gt.scripts.visualize <tape_log_path> [--output <path>] [--dpi <dpi>]")
-        print("  python -m gt.scripts.top [log_path] [--pid PID]")
+        print("  python -m gt.scripts.top [--port PORT] [--host HOST]")
+        print("  python -m gt.scripts.trace -s 2 --dir traces/")
         sys.exit(1)
 
     command = sys.argv[1]
@@ -36,7 +38,11 @@ if __name__ == '__main__':
         from gt.scripts.top import main
         sys.argv = sys.argv[1:]  # Remove 'top' from args
         main()
+    elif command == 'trace':
+        from gt.scripts.trace import main
+        sys.argv = sys.argv[1:]  # Remove 'trace' from args
+        main()
     else:
         print(f"Unknown command: {command}")
-        print("Available commands: visualize, top")
+        print("Available commands: visualize, top, trace")
         sys.exit(1)
