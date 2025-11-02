@@ -167,10 +167,24 @@ def _ensure_connected():
         worker_thread.start()
         worker_threads.append(worker_thread)
 
-    # Give workers time to start and register
-    time.sleep(1.5)
+    # Wait for all workers to register (with timeout)
+    # This is crucial for auto-start since PyTorch can take a while to load
+    timeout = 30.0  # 30 second timeout
+    poll_interval = 0.1  # Check every 100ms
+    elapsed = 0.0
+    while len(dispatcher.workers) < num_workers and elapsed < timeout:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
     t3 = time.time()
-    verbose_print(f"GT: Workers started ({(t3-t2)*1000:.1f}ms)")
+
+    if len(dispatcher.workers) < num_workers:
+        # Timeout - not all workers registered
+        verbose_print(f"GT: WARNING - Only {len(dispatcher.workers)}/{num_workers} workers registered after {timeout}s")
+        verbose_print(f"GT: This may cause 'No workers available' errors")
+    else:
+        verbose_print(f"GT: All {num_workers} worker(s) registered ({(t3-t2)*1000:.1f}ms)")
+
     verbose_print(f"GT: Registered workers: {len(dispatcher.workers)}")
 
     # Connect client
