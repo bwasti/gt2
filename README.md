@@ -28,7 +28,9 @@ For distributed training, see [Distributed Setup](#distributed-setup).
 
 ## Stream Processing
 
-Workers process operations one at a time as they arrive from the dispatcher. This keeps the architecture simple and easy to reason about. Future optimizations may include automatic hot path detection and torch.compile() for repeated operation sequences.
+Workers process operations one at a time as they arrive from the dispatcher, which is fed a stream of instructions from the user client.
+This keeps the architecture simple and easy to reason over.
+
 
 ## Optimized for AI Development
 
@@ -209,6 +211,8 @@ Use cases:
 See `gt/scripts/README.md` for complete documentation.
 
 ## Real-Time Monitoring
+
+<img width="862" height="235" alt="Screenshot 2025-11-02 at 1 54 47 AM" src="https://github.com/user-attachments/assets/e5d2d810-d366-4390-8138-ab4bfec5dd6f" />
 
 Monitor running dispatchers with htop-style worker activity visualization:
 
