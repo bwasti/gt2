@@ -29,6 +29,8 @@ classifiers = [
 dependencies = [
     "numpy>=1.20.0",
     "pytest>=7.0.0",
+    "pyzmq>=24.0.0",
+    "pyyaml>=6.0.0",
 ]
 
 [project.optional-dependencies]
