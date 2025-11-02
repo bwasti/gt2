@@ -329,7 +329,19 @@ class RealtimeMonitor:
 
 
 def find_dispatcher_port():
-    """Try to find dispatcher port from running processes."""
+    """Try to find dispatcher port from running processes or auto-start."""
+    import socket
+
+    # Check auto-start port first (59000)
+    if _check_port_open('localhost', 59001):  # Monitor port is +1
+        return 59000
+
+    # Check common ports
+    for port in [9000, 9001, 9002]:
+        if _check_port_open('localhost', port + 1):  # Monitor port is +1
+            return port
+
+    # Try to find from process list
     try:
         import psutil
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
@@ -351,6 +363,19 @@ def find_dispatcher_port():
         pass
 
     return None
+
+
+def _check_port_open(host: str, port: int) -> bool:
+    """Check if a port is open and accepting connections."""
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.1)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
 
 
 def main():
