@@ -86,7 +86,6 @@ class RealtimeMonitor:
     def __init__(self, host: str, port: int, window_seconds: float = 2.0):
         self.host = host
         self.port = port
-        self.monitor_port = port + 1  # Monitor socket is dispatcher_port + 1
         self.window_seconds = window_seconds
         self.workers: Dict[str, WorkerStats] = {}
         self.event_window = deque()  # Rolling window of events
@@ -99,7 +98,12 @@ class RealtimeMonitor:
 
     def connect(self):
         """Connect to dispatcher monitoring socket."""
-        monitor_url = f"tcp://{self.host}:{self.monitor_port}"
+        # Dispatcher uses IPC for localhost, TCP for remote
+        if self.host in ('localhost', '127.0.0.1', '0.0.0.0'):
+            monitor_url = f"ipc:///tmp/gt_monitor_{self.port}.ipc"
+        else:
+            # For remote hosts, fall back to TCP (dispatcher would need to support this)
+            monitor_url = f"tcp://{self.host}:{self.port + 1}"
         self.socket.connect(monitor_url)
         return monitor_url
 
@@ -389,15 +393,16 @@ class RealtimeMonitor:
 
 def find_dispatcher_port():
     """Try to find dispatcher port from running processes or auto-start."""
-    import socket
+    import os
 
+    # Check for IPC sockets in /tmp (for localhost dispatchers)
     # Check auto-start port first (59000)
-    if _check_port_open('localhost', 59001):  # Monitor port is +1
+    if os.path.exists('/tmp/gt_monitor_59000.ipc'):
         return 59000
 
     # Check common ports
-    for port in [9000, 9001, 9002]:
-        if _check_port_open('localhost', port + 1):  # Monitor port is +1
+    for port in [9000, 9001, 9002, 10000, 12000]:
+        if os.path.exists(f'/tmp/gt_monitor_{port}.ipc'):
             return port
 
     # Try to find from process list
@@ -422,19 +427,6 @@ def find_dispatcher_port():
         pass
 
     return None
-
-
-def _check_port_open(host: str, port: int) -> bool:
-    """Check if a port is open and accepting connections."""
-    import socket
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(0.1)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
-    except Exception:
-        return False
 
 
 def main():
