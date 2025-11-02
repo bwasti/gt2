@@ -35,23 +35,28 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "torch>=2.0.0",
+    "matplotlib>=3.5.0",
+]
+viz = [
+    "matplotlib>=3.5.0",
 ]
 all = [
     "torch>=2.0.0",
+    "matplotlib>=3.5.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/gt2"
-Documentation = "https://github.com/yourusername/gt2"
-Repository = "https://github.com/yourusername/gt2"
-"Bug Tracker" = "https://github.com/yourusername/gt2/issues"
+Homepage = "https://github.com/bwasti/gt"
+Documentation = "https://github.com/bwasti/gt"
+Repository = "https://github.com/bwasti/gt"
+"Bug Tracker" = "https://github.com/bwasti/gt/issues"
 
 [project.scripts]
 gt-server = "gt.server.__main__:main"
 gt-worker = "gt.worker.__main__:main"
 
 [tool.setuptools]
-packages = ["gt", "gt.client", "gt.dispatcher", "gt.worker", "gt.server", "gt.transport"]
+packages = ["gt", "gt.client", "gt.dispatcher", "gt.worker", "gt.server", "gt.transport", "gt.scripts"]
 
 [tool.setuptools.package-data]
 gt = ["py.typed"]
