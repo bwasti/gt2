@@ -1,324 +1,259 @@
 """
-Hot path detection for automatic torch.compile() optimization.
+Hot path detection - stream transformer that injects HOTPATH markers.
 
-Operates on the INSTRUCTION STREAM - individual operations as they arrive.
-Detects repeated sequences in the stream and enables compilation.
+This is a PURE STREAM TRANSFORMER:
+- Takes WorkerCommand stream as input
+- Yields WorkerCommand stream as output (with markers injected)
+- Does NOT buffer or execute anything
+- Engines decide what to do with HOTPATH_START/END markers
 
-Key insight: Batching is just transport optimization (message reduction).
-Hot path detection should see the raw instruction stream.
+The detector identifies repeated sequences and injects markers around them:
 
-CRITICAL: Signatures must be based on DEPENDENCY GRAPH structure, not just
-operation sequence. The order and dependencies of inputs matter!
+Input stream:
+  ADD X, Y -> Z
+  MUL Z, C -> D
+  <sync point>
+  ADD X, Y -> Z    (pattern repeats!)
+  MUL Z, C -> D
 
-Example:
-  a = f(b, c)
-  e = g(a, d)  # e depends on a
-Is NOT the same as:
-  a = f(b, c)
-  e = g(b, c)  # e doesn't depend on a
+Output stream (with markers):
+  ADD X, Y -> Z
+  MUL Z, C -> D
+  <sync point>
+  HOTPATH_START 0xA4E7
+  ADD X, Y -> Z
+  MUL Z, C -> D
+  HOTPATH_END 0xA4E7
 """
 
-from typing import List, Dict, Optional, Tuple, Set
+from typing import Iterator, Optional, List
 from collections import deque
 import hashlib
-import time
 from gt.debug import debug_print_compile
+from gt.transport.protocol import (
+    WorkerCommand, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
+    WorkerGetData, WorkerHotPathStart, WorkerHotPathEnd
+)
 
 
 class InstructionSignature:
-    """Signature for a single instruction with dependency tracking."""
+    """Lightweight signature for a single instruction."""
 
-    def __init__(self, op_type: str, op_name: str, result_id: str, input_ids: List[str]):
-        """
-        Create signature for an instruction.
-
-        Args:
-            op_type: 'binary', 'unary', 'reshape', etc.
-            op_name: 'matmul', 'relu', 'add', etc.
-            result_id: ID of the output tensor
-            input_ids: List of input tensor IDs (order matters!)
-        """
+    def __init__(self, op_type: str, op_name: str):
         self.op_type = op_type
         self.op_name = op_name
-        self.result_id = result_id
-        self.input_ids = input_ids
-
-    def __repr__(self):
-        inputs_str = ",".join(self.input_ids)
-        return f"{self.result_id}={self.op_name}({inputs_str})"
-
-
-class StreamSignature:
-    """
-    Signature for a sequence of instructions based on dependency graph structure.
-
-    Canonicalizes the instruction stream by renormalizing tensor IDs based on
-    the dependency graph structure, not the actual ID values.
-    """
-
-    def __init__(self, instructions: List[InstructionSignature]):
-        """
-        Create signature from instruction sequence.
-
-        Args:
-            instructions: List of InstructionSignature objects
-        """
-        self.instructions = instructions
-        self.length = len(instructions)
-        self.hash = self._compute_graph_hash()
-
-    def _compute_graph_hash(self) -> str:
-        """
-        Compute hash based on dependency graph structure.
-
-        Renormalizes tensor IDs to create a canonical representation:
-        - Inputs are renormalized based on first use
-        - Intermediate values are numbered by creation order
-        - The graph structure (which op depends on which outputs) is preserved
-        """
-        if not self.instructions:
-            return hashlib.md5(b"").hexdigest()[:12]
-
-        # Build dependency graph and renormalize IDs
-        id_mapping = {}  # Old ID -> Canonical ID
-        next_input_id = 0
-        next_intermediate_id = 0
-        canonical_ops = []
-
-        for inst in self.instructions:
-            # Renormalize input IDs
-            canonical_inputs = []
-            for input_id in inst.input_ids:
-                if input_id not in id_mapping:
-                    # First time seeing this input - it's an external input
-                    id_mapping[input_id] = f"in{next_input_id}"
-                    next_input_id += 1
-                canonical_inputs.append(id_mapping[input_id])
-
-            # Renormalize output ID
-            canonical_result = f"t{next_intermediate_id}"
-            id_mapping[inst.result_id] = canonical_result
-            next_intermediate_id += 1
-
-            # Create canonical operation string
-            # Format: "result = op(input1, input2, ...)"
-            # This preserves input ORDER and dependencies
-            inputs_str = ",".join(canonical_inputs)
-            op_str = f"{canonical_result}={inst.op_name}({inputs_str})"
-            canonical_ops.append(op_str)
-
-        # Hash the canonical representation
-        canonical_str = "|".join(canonical_ops)
-        return hashlib.md5(canonical_str.encode()).hexdigest()[:12]
 
     def __eq__(self, other):
-        return self.hash == other.hash
+        return self.op_type == other.op_type and self.op_name == other.op_name
 
     def __hash__(self):
-        return hash(self.hash)
+        return hash((self.op_type, self.op_name))
 
     def __repr__(self):
-        return f"Stream({self.hash}:{self.length}ops)"
+        return f"{self.op_type}:{self.op_name}"
+
+
+class SequenceSignature:
+    """Signature for a sequence of instructions."""
+
+    def __init__(self, instructions: List[InstructionSignature]):
+        self.instructions = instructions
+        self.length = len(instructions)
+
+    def __eq__(self, other):
+        return self.instructions == other.instructions
+
+    def __hash__(self):
+        return hash(tuple(self.instructions))
+
+    def __repr__(self):
+        return f"Seq({self.length}ops)"
 
 
 class HotPathDetector:
     """
-    Detects repeated instruction sequences in the operation stream.
+    Stream transformer that detects hot paths and injects markers.
 
-    Tracks individual instructions as they arrive (stream-based).
-    Detects when sequences repeat many times.
-
-    TODO: Advanced graph analysis for independent subgraphs
-    --------------------------------------------------------
-    Currently we detect hot paths in the instruction stream as-is.
-    Future enhancement: Detect when multiple INDEPENDENT dependency graphs
-    are interleaved in the stream, and:
-
-    1. Identify independent subgraphs within a sequence
-    2. Extract and compile only the hot subgraph(s)
-    3. Re-sort the instruction stream to group compiled code together
-    4. Execute with partial compilation (compile hot path, stream cold path)
-
-    Example:
-        # Interleaved independent graphs
-        a = f(b)      # Graph 1
-        x = g(y)      # Graph 2 (independent of Graph 1)
-        c = h(a)      # Graph 1 continued
-        z = k(x)      # Graph 2 continued
-
-    If Graph 1 is hot but Graph 2 is cold, we should:
-    - Detect they are independent (no shared tensors)
-    - Re-sort to: [Graph 1 ops] [Graph 2 ops]
-    - Compile only Graph 1
-    - Execute: compiled_fn(b) + stream_execute(Graph 2)
-
-    This maximizes compilation benefits without over-compiling.
+    Usage:
+        detector = HotPathDetector(hot_threshold=10)
+        for cmd in command_stream:
+            for output_cmd in detector.process(cmd):
+                yield output_cmd
     """
 
-    def __init__(
-        self,
-        window_size: int = 20,
-        hot_threshold: int = 10,
-        min_sequence_length: int = 5,
-    ):
+    def __init__(self, window_size: int = 20, hot_threshold: int = 10, min_sequence_length: int = 3):
         """
-        Initialize stream-based hot path detector.
+        Initialize hot path detector.
 
         Args:
-            window_size: How many recent instructions to track
+            window_size: Number of recent instructions to track
             hot_threshold: Number of repetitions before marking as hot
-            min_sequence_length: Minimum length of sequence to detect
+            min_sequence_length: Minimum operations for a sequence to be hot
         """
         self.window_size = window_size
         self.hot_threshold = hot_threshold
         self.min_sequence_length = min_sequence_length
 
-        # Instruction stream tracking
-        self.instruction_stream: deque = deque(maxlen=window_size)
+        # Sliding window of recent instructions
+        self.window: deque = deque(maxlen=window_size)
 
-        # Pattern detection
-        self.sequence_counts: Dict[StreamSignature, int] = {}
-        self.hot_sequences: set = set()
+        # Track repetition counts for sequences
+        self.sequence_counts: dict = {}  # SequenceSignature -> count
 
-        # Current sequence tracking (for learning)
-        self.current_sequence: List[InstructionSignature] = []
-        self.sequence_start_idx = 0
+        # Active hot sequence tracking
+        self.active_hot_sequence: Optional[SequenceSignature] = None
+        self.active_position = 0  # Position within active sequence
 
-        # Active sequence tracking (for prediction/matching)
-        self.active_hot_sequence: Optional[StreamSignature] = None
-        self.active_position = 0  # Current position in active sequence
-
-        # Statistics
+        # Stats
         self.total_instructions = 0
-        self.hot_instructions_executed = 0
+        self.hot_instructions = 0
+
+    def _extract_signature(self, cmd: WorkerCommand) -> Optional[InstructionSignature]:
+        """Extract operation signature from command (or None for non-compute ops)."""
+        if isinstance(cmd, WorkerBinaryOp):
+            return InstructionSignature('binary', cmd.op)
+        elif isinstance(cmd, WorkerUnaryOp):
+            if cmd.input_id is not None:  # Only compute ops
+                return InstructionSignature('unary', cmd.op)
+        elif isinstance(cmd, WorkerReshapeOp):
+            return InstructionSignature('reshape', cmd.op)
+        elif isinstance(cmd, WorkerSliceOp):
+            return InstructionSignature('slice', 'subscript')
+        return None
+
+    def _is_sync_op(self, cmd: WorkerCommand) -> bool:
+        """Check if command is a sync point (GetData, etc.)."""
+        return isinstance(cmd, WorkerGetData)
+
+    def _detect_hot_sequence(self) -> Optional[SequenceSignature]:
+        """
+        Detect if any sequence in the window is hot.
+
+        Returns the longest hot sequence, or None if none found.
+        """
+        if len(self.window) < self.min_sequence_length:
+            return None
+
+        # Try sequences from longest to shortest
+        for seq_len in range(len(self.window), self.min_sequence_length - 1, -1):
+            # Check if we have enough instructions for this length
+            if seq_len > len(self.window):
+                continue
+
+            # Get the most recent sequence of this length
+            recent_seq = SequenceSignature(list(self.window)[-seq_len:])
+
+            # Check if this sequence is hot
+            count = self.sequence_counts.get(recent_seq, 0)
+            if count >= self.hot_threshold:
+                return recent_seq
+
+        return None
 
     def _matches_pattern(self, inst: InstructionSignature, pattern: InstructionSignature) -> bool:
-        """Check if instruction matches the pattern (op_type and op_name must match)."""
-        return inst.op_type == pattern.op_type and inst.op_name == pattern.op_name
+        """Check if instruction matches the pattern."""
+        return inst == pattern
 
-    def record_instruction(
-        self,
-        op_type: str,
-        op_name: str,
-        result_id: str,
-        input_ids: List[str]
-    ) -> Tuple[bool, Optional[int]]:
+    def process(self, cmd: WorkerCommand) -> Iterator[WorkerCommand]:
         """
-        Record an instruction in the stream.
+        Process a command and yield output commands (with potential markers).
 
-        STATE MACHINE for predictive buffering:
-        1. If we're matching an active hot sequence, check if this continues the pattern
-        2. If no active sequence, check if this starts a known hot sequence
-        3. Otherwise, record for learning
-
-        Args:
-            op_type: Type of operation ('binary', 'unary', etc.)
-            op_name: Name of operation ('matmul', 'relu', etc.)
-            result_id: ID of the output tensor
-            input_ids: List of input tensor IDs (order matters!)
-
-        Returns:
-            (should_compile, sequence_length) - True if we should buffer/compile,
-            and if so, total length of the hot sequence
+        Yields:
+            Original command plus potential HOTPATH_START/END markers
         """
+        # Sync operations reset detection
+        if self._is_sync_op(cmd):
+            # End any active sequence
+            if self.active_hot_sequence is not None:
+                # Don't emit END marker - sequence was interrupted
+                self.active_hot_sequence = None
+                self.active_position = 0
+
+            # Reset window
+            self.window.clear()
+            self.sequence_counts.clear()
+
+            # Pass through sync command
+            yield cmd
+            return
+
+        # Extract signature (skip non-compute ops)
+        sig = self._extract_signature(cmd)
+        if sig is None:
+            yield cmd
+            return
+
         self.total_instructions += 1
 
-        # Create instruction signature
-        inst = InstructionSignature(op_type, op_name, result_id, input_ids)
-
-        # STATE 1: Are we currently matching a hot sequence?
+        # STATE 1: Are we currently inside a hot sequence?
         if self.active_hot_sequence is not None:
             expected = self.active_hot_sequence.instructions[self.active_position]
 
-            if self._matches_pattern(inst, expected):
-                # Matches! Continue the sequence
+            # Check if current instruction matches expected pattern
+            if self._matches_pattern(sig, expected):
+                # Continue in hot sequence
                 self.active_position += 1
 
+                # Yield the command (part of hot sequence)
+                yield cmd
+
+                # Check if sequence is complete
                 if self.active_position >= self.active_hot_sequence.length:
-                    # Sequence complete! Execute it
-                    seq_length = self.active_hot_sequence.length
-                    debug_print_compile(f"Hot sequence complete: {self.active_hot_sequence}")
+                    # Emit END marker
+                    seq_id = hex(hash(self.active_hot_sequence))
+                    yield WorkerHotPathEnd(sequence_id=seq_id)
+                    debug_print_compile(f"Hot sequence {seq_id} complete ({self.active_hot_sequence.length} ops)")
+
+                    # Reset for next iteration
                     self.active_hot_sequence = None
                     self.active_position = 0
-                    self.hot_instructions_executed += 1
-                    return True, seq_length
-                else:
-                    # Continue buffering
-                    return True, self.active_hot_sequence.length
+
+                return
             else:
-                # Divergence! Fall back to learning mode
-                debug_print_compile(f"Sequence diverged at position {self.active_position}")
+                # Pattern broken - stop tracking this sequence
+                debug_print_compile(f"Hot sequence interrupted (expected {expected}, got {sig})")
                 self.active_hot_sequence = None
                 self.active_position = 0
-                # Fall through to learning mode
+                # Fall through to normal processing
 
-        # STATE 2: Check if this starts a known hot sequence
-        for hot_seq in self.hot_sequences:
-            if hot_seq.length > 0 and self._matches_pattern(inst, hot_seq.instructions[0]):
-                # This starts a hot sequence! Enter matching mode
-                debug_print_compile(f"Starting hot sequence: {hot_seq}")
-                self.active_hot_sequence = hot_seq
-                self.active_position = 1  # We just matched position 0
-                return True, hot_seq.length
+        # STATE 2: Not in active sequence - record and detect patterns
+        self.window.append(sig)
 
-        # STATE 3: Learning mode - record sequences for future detection
-        self.instruction_stream.append(inst)
-        self.current_sequence.append(inst)
+        # Update sequence counts for all possible sequences ending here
+        for seq_len in range(self.min_sequence_length, len(self.window) + 1):
+            if seq_len <= len(self.window):
+                recent_seq = SequenceSignature(list(self.window)[-seq_len:])
+                self.sequence_counts[recent_seq] = self.sequence_counts.get(recent_seq, 0) + 1
 
-        # Check for repeated sequences (learning)
-        if len(self.current_sequence) >= self.min_sequence_length:
-            seq_sig = StreamSignature(self.current_sequence)
+        # Check if we should start a hot sequence
+        hot_seq = self._detect_hot_sequence()
+        if hot_seq is not None:
+            self.active_hot_sequence = hot_seq
+            self.active_position = 0
 
-            if seq_sig in self.sequence_counts:
-                self.sequence_counts[seq_sig] += 1
-                count = self.sequence_counts[seq_sig]
+            # Check if current instruction is the START of the hot sequence
+            if self._matches_pattern(sig, hot_seq.instructions[0]):
+                # Emit START marker
+                seq_id = hex(hash(hot_seq))
+                yield WorkerHotPathStart(sequence_id=seq_id)
+                debug_print_compile(f"Starting hot sequence {seq_id} ({hot_seq.length} ops, seen {self.sequence_counts[hot_seq]} times)")
 
-                # Mark as hot if threshold reached
-                if count >= self.hot_threshold and seq_sig not in self.hot_sequences:
-                    self.hot_sequences.add(seq_sig)
-                    debug_print_compile(f"Detected hot sequence after {count} reps: {seq_sig}")
-            else:
-                # New sequence
-                self.sequence_counts[seq_sig] = 1
+                self.active_position = 1
+                self.hot_instructions += 1
 
-            # Sliding window
-            if len(self.current_sequence) > self.window_size // 2:
-                self.current_sequence = self.current_sequence[self.min_sequence_length:]
+        # Always yield the original command
+        yield cmd
 
-        return False, None
-
-    def reset_sequence(self):
-        """Reset current sequence tracking (call at sync points)."""
-        # Reset active matching state
-        self.active_hot_sequence = None
-        self.active_position = 0
-
-        if self.current_sequence:
-            # Record the sequence we just saw
-            if len(self.current_sequence) >= self.min_sequence_length:
-                seq_sig = StreamSignature(self.current_sequence)
-                if seq_sig not in self.sequence_counts:
-                    self.sequence_counts[seq_sig] = 0
-                self.sequence_counts[seq_sig] += 1
-
-            self.current_sequence = []
-
-    def get_stats(self) -> Dict:
-        """Get statistics about detected patterns."""
+    def get_stats(self) -> dict:
+        """Get detection statistics."""
         return {
             'total_instructions': self.total_instructions,
-            'hot_instructions': self.hot_instructions_executed,
+            'hot_instructions': self.hot_instructions,
             'unique_sequences': len(self.sequence_counts),
-            'hot_sequences': len(self.hot_sequences),
+            'hot_sequences': sum(1 for count in self.sequence_counts.values() if count >= self.hot_threshold),
             'hot_threshold': self.hot_threshold,
-            'window_size': self.window_size,
-            'top_sequences': sorted(
-                [(seq, count) for seq, count in self.sequence_counts.items()],
-                key=lambda x: x[1],
-                reverse=True
-            )[:5],
+            'top_sequences': [
+                (repr(seq), count)
+                for seq, count in sorted(self.sequence_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            ]
         }
-
-    def should_enable_compilation(self) -> bool:
-        """Check if any hot sequences have been detected."""
-        return len(self.hot_sequences) > 0

@@ -1,22 +1,23 @@
 """
 Worker executes operations using an Engine (numpy, pytorch, jax).
 
-Workers are dumb executors - they just run what dispatcher tells them.
+Workers are simple command processors - they execute what dispatcher tells them.
+All compilation logic is in the Engine, not the Worker.
 
 Keep this SIMPLE and READABLE.
 """
 
 import os
 import numpy as np
-from typing import List, Dict, Any
-from gt.transport.connection import connect, Connection
+from typing import Dict, Any
+from gt.transport.connection import connect
 from gt.transport.protocol import (
     WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
-    WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse
+    WorkerGetData, WorkerFreeTensor, WorkerHotPathStart, WorkerHotPathEnd, WorkerGetStats, WorkerResponse
 )
 from gt.worker.engine import create_engine, Engine, Operation
 from gt.worker.hotpath_detector import HotPathDetector
-from gt.debug import debug_print_worker, debug_print_compile
+from gt.debug import debug_print_worker
 
 
 class Worker:
@@ -24,7 +25,7 @@ class Worker:
     Worker executes operations using an Engine backend.
 
     Supports multiple backends: 'numpy', 'pytorch'
-    Processes instructions one at a time (no batching).
+    Processes instructions through optional hot path detector.
     """
 
     def __init__(self, worker_id: str, backend="pytorch"):
@@ -34,7 +35,7 @@ class Worker:
 
         # Hot path detection configuration
         auto_compile = os.environ.get('GT_AUTO_COMPILE', '0') == '1'
-        enable_compilation = auto_compile  # Enable compilation if auto-compile is on
+        enable_compilation = auto_compile
 
         # Statistics tracking
         self.stats = {
@@ -50,10 +51,6 @@ class Worker:
 
         # Initialize hot path detector if enabled
         self.hotpath_detector = None
-        self.hot_sequence_buffer = []  # Buffer operations during hot sequence
-        self.in_hot_sequence = False
-        self.hot_sequence_remaining = 0
-
         if auto_compile:
             window_size = int(os.environ.get('GT_HOTPATH_WINDOW', '20'))
             hot_threshold = int(os.environ.get('GT_HOTPATH_THRESHOLD', '10'))
@@ -64,9 +61,9 @@ class Worker:
                 hot_threshold=hot_threshold,
                 min_sequence_length=min_seq_length,
             )
-            debug_print_compile(f"Worker {self.worker_id}: Hot path compilation enabled (threshold={hot_threshold})")
+            debug_print_worker(f"Worker {self.worker_id}: Hot path compilation enabled")
         else:
-            debug_print_worker(f"Worker {self.worker_id}: Stream processing mode")
+            debug_print_worker(f"Worker {self.worker_id}: Eager execution mode")
 
     def connect_to_dispatcher(self, dispatcher_host="localhost", dispatcher_port=9000):
         """Connect to dispatcher and start processing."""
@@ -80,7 +77,7 @@ class Worker:
         self.conn.send(reg_cmd)
         reg_response = self.conn.recv()
         if not reg_response.success:
-            print(f"Worker {self.worker_id} failed to register: {reg_response.error}")  # Keep error visible
+            print(f"Worker {self.worker_id} failed to register: {reg_response.error}")
             return
 
         debug_print_worker(f"Worker {self.worker_id} registered successfully")
@@ -92,250 +89,64 @@ class Worker:
                 response = self._process_command(cmd)
                 self.conn.send(response)
             except Exception as e:
-                print(f"Worker {self.worker_id} error: {e}")  # Keep errors visible
+                print(f"Worker {self.worker_id} error: {e}")
                 break
 
     def _process_command(self, cmd: WorkerCommand) -> WorkerResponse:
-        """Process a command from dispatcher (one at a time, no batching)."""
+        """Process a command from dispatcher."""
         try:
-            # Record instruction in hot path detector (before execution)
-            is_hot = False
-            if self.hotpath_detector and self._is_compute_op(cmd):
-                is_hot, seq_length = self._record_in_hotpath_detector(cmd)
-
-                # Start buffering if hot sequence detected
-                if is_hot and not self.in_hot_sequence:
-                    self.in_hot_sequence = True
-                    self.hot_sequence_remaining = seq_length
-                    self.hot_sequence_buffer = []
-                    debug_print_compile(f"Starting hot sequence (length={seq_length})")
-
-            # Sync operations always flush and execute immediately
-            if isinstance(cmd, WorkerGetData):
-                # Flush any buffered operations
-                if self.in_hot_sequence:
-                    debug_print_compile(f"GetData: flushing buffer with {len(self.hot_sequence_buffer)} ops")
-                    self._execute_hot_sequence_buffer()
-                if self.hotpath_detector:
-                    self.hotpath_detector.reset_sequence()
-                return self._handle_get_data(cmd)
-            elif isinstance(cmd, WorkerFreeTensor):
-                # During hot sequence buffering, defer FreeTensor - don't flush!
-                # The tensor is still in self.tensors and will be used by buffered ops.
-                # We'll process frees after the sequence completes.
-                if self.in_hot_sequence:
-                    debug_print_compile(f"Deferring FreeTensor during hot sequence")
-                    # Just respond success - tensor will be freed eventually
-                    return WorkerResponse(success=True)
-                return self._handle_free_tensor(cmd)
-            elif isinstance(cmd, WorkerGetStats):
-                return self._handle_get_stats(cmd)
-            elif isinstance(cmd, WorkerCreateTensor):
-                return self._handle_create_tensor(cmd)
-
-            # Compute operations: buffer if in hot sequence, otherwise execute
-            if self.in_hot_sequence and self._is_compute_op(cmd):
-                # Check if all inputs are available
-                input_ids = self._get_input_ids(cmd)
-                all_inputs_available = all(
-                    tid in self.tensors or any(
-                        bcmd for bcmd in self.hot_sequence_buffer
-                        if self._get_result_id(bcmd) == tid
-                    )
-                    for tid in input_ids
-                )
-
-                # If inputs not available, flush buffer and execute eagerly
-                if not all_inputs_available:
-                    debug_print_compile(f"Input missing (need {input_ids}, have {list(self.tensors.keys())[:10]}...), flushing buffer and executing eagerly")
-                    self._execute_hot_sequence_buffer()
-                    # Reset hot sequence state
-                    if self.hotpath_detector:
-                        self.hotpath_detector.reset_sequence()
-                    # Execute this operation eagerly
-                    return self._execute_op_eagerly(cmd)
-
-                # Buffer the operation
-                self.hot_sequence_buffer.append(cmd)
-                self.hot_sequence_remaining -= 1
-                debug_print_compile(f"Buffered operation (buffer_size={len(self.hot_sequence_buffer)}, remaining={self.hot_sequence_remaining})")
-
-                # Execute batch when sequence completes
-                if self.hot_sequence_remaining <= 0:
-                    debug_print_compile(f"Sequence complete, executing buffer of {len(self.hot_sequence_buffer)} ops")
-                    self._execute_hot_sequence_buffer()
-
+            # If hot path detection enabled, pass through transformer
+            if self.hotpath_detector is not None:
+                # Process command through detector (yields markers + original command)
+                for output_cmd in self.hotpath_detector.process(cmd):
+                    self._execute_command(output_cmd)
                 return WorkerResponse(success=True)
-
-            # Not in hot sequence - execute immediately (eager mode)
-            if isinstance(cmd, WorkerBinaryOp):
-                return self._handle_binary_op(cmd)
-            elif isinstance(cmd, WorkerUnaryOp):
-                return self._handle_unary_op(cmd)
-            elif isinstance(cmd, WorkerReshapeOp):
-                return self._handle_reshape_op(cmd)
-            elif isinstance(cmd, WorkerSliceOp):
-                return self._handle_slice_op(cmd)
             else:
-                return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
+                # Direct execution (no hot path detection)
+                return self._execute_command(cmd)
 
         except Exception as e:
-            # Reset hot sequence on error
-            self.in_hot_sequence = False
-            self.hot_sequence_buffer = []
             return WorkerResponse(success=False, error=str(e))
 
-    def _is_compute_op(self, cmd: WorkerCommand) -> bool:
-        """Check if command is a compute operation (vs control/data ops)."""
-        return isinstance(cmd, (WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp))
+    def _execute_command(self, cmd: WorkerCommand) -> WorkerResponse:
+        """Execute a single command (after hot path processing)."""
+        # Hot path markers
+        if isinstance(cmd, WorkerHotPathStart):
+            self.engine.handle_hotpath_start(cmd.sequence_id)
+            return WorkerResponse(success=True)
 
-    def _get_input_ids(self, cmd: WorkerCommand) -> list:
-        """Get input tensor IDs from a command."""
-        if isinstance(cmd, WorkerBinaryOp):
-            return [cmd.left_id, cmd.right_id]
-        elif isinstance(cmd, WorkerUnaryOp):
-            return [cmd.input_id] if cmd.input_id else []
-        elif isinstance(cmd, WorkerReshapeOp):
-            return [cmd.input_id]
-        elif isinstance(cmd, WorkerSliceOp):
-            return [cmd.input_id]
-        return []
+        elif isinstance(cmd, WorkerHotPathEnd):
+            self.engine.handle_hotpath_end(cmd.sequence_id)
+            return WorkerResponse(success=True)
 
-    def _get_result_id(self, cmd: WorkerCommand) -> str:
-        """Get result tensor ID from a command."""
-        if hasattr(cmd, 'result_id'):
-            return cmd.result_id
-        return None
+        # Non-compute commands
+        elif isinstance(cmd, WorkerCreateTensor):
+            return self._handle_create_tensor(cmd)
 
-    def _execute_op_eagerly(self, cmd: WorkerCommand):
-        """Execute a single operation eagerly (no buffering)."""
-        if isinstance(cmd, WorkerBinaryOp):
+        elif isinstance(cmd, WorkerGetData):
+            return self._handle_get_data(cmd)
+
+        elif isinstance(cmd, WorkerFreeTensor):
+            return self._handle_free_tensor(cmd)
+
+        elif isinstance(cmd, WorkerGetStats):
+            return self._handle_get_stats(cmd)
+
+        # Compute operations
+        elif isinstance(cmd, WorkerBinaryOp):
             return self._handle_binary_op(cmd)
+
         elif isinstance(cmd, WorkerUnaryOp):
             return self._handle_unary_op(cmd)
+
         elif isinstance(cmd, WorkerReshapeOp):
             return self._handle_reshape_op(cmd)
+
         elif isinstance(cmd, WorkerSliceOp):
             return self._handle_slice_op(cmd)
-        return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
 
-    def _record_in_hotpath_detector(self, cmd: WorkerCommand):
-        """Record operation in hot path detector."""
-        if isinstance(cmd, WorkerBinaryOp):
-            return self.hotpath_detector.record_instruction(
-                'binary',
-                cmd.op,
-                result_id=cmd.result_id,
-                input_ids=[cmd.left_id, cmd.right_id]
-            )
-        elif isinstance(cmd, WorkerUnaryOp):
-            if cmd.input_id is not None:  # Only record compute ops
-                return self.hotpath_detector.record_instruction(
-                    'unary',
-                    cmd.op,
-                    result_id=cmd.result_id,
-                    input_ids=[cmd.input_id]
-                )
-        elif isinstance(cmd, WorkerReshapeOp):
-            return self.hotpath_detector.record_instruction(
-                'reshape',
-                cmd.op,
-                result_id=cmd.result_id,
-                input_ids=[cmd.input_id]
-            )
-        elif isinstance(cmd, WorkerSliceOp):
-            return self.hotpath_detector.record_instruction(
-                'slice',
-                'subscript',  # Generic name for slice operations
-                result_id=cmd.result_id,
-                input_ids=[cmd.input_id]
-            )
-        return False, None
-
-    def _execute_hot_sequence_buffer(self):
-        """Execute buffered operations as a compiled batch."""
-        if not self.hot_sequence_buffer:
-            return
-
-        import traceback
-        caller = traceback.extract_stack()[-2]
-        debug_print_compile(f"Compiling and executing {len(self.hot_sequence_buffer)} operations (called from: {caller.name}:{caller.lineno})")
-
-        # Convert commands to Operation objects
-        operations = []
-        for cmd in self.hot_sequence_buffer:
-            if isinstance(cmd, WorkerBinaryOp):
-                operations.append(Operation(
-                    op_type='binary',
-                    op_name=cmd.op,
-                    result_id=cmd.result_id,
-                    input_ids=[cmd.left_id, cmd.right_id]
-                ))
-            elif isinstance(cmd, WorkerUnaryOp):
-                params = {}
-                if hasattr(cmd, 'axis') and cmd.axis is not None:
-                    params['axis'] = cmd.axis
-                if hasattr(cmd, 'keepdims'):
-                    params['keepdims'] = cmd.keepdims
-                if hasattr(cmd, 'shape') and cmd.shape is not None:
-                    params['shape'] = cmd.shape
-                if hasattr(cmd, 'dtype') and cmd.dtype is not None:
-                    params['dtype'] = cmd.dtype
-
-                operations.append(Operation(
-                    op_type='unary',
-                    op_name=cmd.op,
-                    result_id=cmd.result_id,
-                    input_ids=[cmd.input_id] if cmd.input_id else [],
-                    params=params if params else None
-                ))
-            elif isinstance(cmd, WorkerReshapeOp):
-                operations.append(Operation(
-                    op_type='reshape',
-                    op_name=cmd.op,
-                    result_id=cmd.result_id,
-                    input_ids=[cmd.input_id],
-                    params=cmd.params
-                ))
-            elif isinstance(cmd, WorkerSliceOp):
-                operations.append(Operation(
-                    op_type='slice',
-                    op_name='subscript',
-                    result_id=cmd.result_id,
-                    input_ids=[cmd.input_id],
-                    params=cmd.key
-                ))
-
-        # Execute as compiled batch
-        try:
-            results = self.engine.execute_batch(operations, self.tensors)
-
-            # Store results
-            for tensor_id, tensor_value in results.items():
-                self.tensors[tensor_id] = tensor_value
-
-            self.stats['operations']['compiled'] += len(operations)
-            debug_print_compile(f"Successfully compiled {len(operations)} ops")
-
-        except Exception as e:
-            debug_print_compile(f"Compilation failed, falling back to eager: {e}")
-            # Fall back to eager execution
-            for cmd in self.hot_sequence_buffer:
-                if isinstance(cmd, WorkerBinaryOp):
-                    self._handle_binary_op(cmd)
-                elif isinstance(cmd, WorkerUnaryOp):
-                    self._handle_unary_op(cmd)
-                elif isinstance(cmd, WorkerReshapeOp):
-                    self._handle_reshape_op(cmd)
-                elif isinstance(cmd, WorkerSliceOp):
-                    self._handle_slice_op(cmd)
-
-            self.stats['operations']['eager'] += len(operations)
-
-        # Reset buffer
-        self.in_hot_sequence = False
-        self.hot_sequence_buffer = []
-        self.hot_sequence_remaining = 0
+        else:
+            return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
 
     def _handle_create_tensor(self, cmd: WorkerCreateTensor) -> WorkerResponse:
         """Create a tensor."""
@@ -346,25 +157,37 @@ class Worker:
         """Execute binary operation."""
         self.stats['operations']['total'] += 1
 
+        # If engine is buffering (hot sequence), queue the operation
+        # Don't validate inputs - they might be results from earlier buffered ops
+        if hasattr(self.engine, 'is_buffering') and self.engine.is_buffering():
+            op = Operation(
+                op_type='binary',
+                op_name=cmd.op,
+                result_id=cmd.result_id,
+                input_ids=[cmd.left_id, cmd.right_id]
+            )
+            self.engine.queue_operation(op, self.tensors)
+            return WorkerResponse(success=True)
+
+        # Otherwise execute eagerly - validate inputs
         if cmd.left_id not in self.tensors or cmd.right_id not in self.tensors:
             return WorkerResponse(success=False, error="Input tensor not found")
 
         left = self.tensors[cmd.left_id]
         right = self.tensors[cmd.right_id]
 
-        # Execute operation using engine
         if cmd.op == "add":
             result = self.engine.add(left, right)
         elif cmd.op == "sub":
-            result = left - right  # TODO: add to engine
+            result = left - right
         elif cmd.op == "mul":
             result = self.engine.mul(left, right)
         elif cmd.op == "div":
-            result = left / right  # TODO: add to engine
+            result = left / right
         elif cmd.op == "matmul":
             result = self.engine.matmul(left, right)
         elif cmd.op == "gt":
-            result = (left > right)  # TODO: add to engine
+            result = (left > right)
             if self.backend_name == "pytorch":
                 result = result.float()
             else:
@@ -379,14 +202,13 @@ class Worker:
         """Execute unary operation."""
         self.stats['operations']['total'] += 1
 
-        # Operations that create new data
+        # Operations that create new data - execute eagerly (not buffered)
         if cmd.input_id is None:
             if cmd.op == "randn":
                 result = self.engine.randn(cmd.shape, cmd.dtype)
             elif cmd.op == "zeros":
                 result = self.engine.zeros(cmd.shape, cmd.dtype)
             elif cmd.op == "ones":
-                # TODO: add ones() to engine
                 if self.backend_name == "pytorch":
                     import torch
                     result = torch.ones(*cmd.shape)
@@ -399,17 +221,36 @@ class Worker:
             return WorkerResponse(success=True)
 
         # Operations on existing tensors
+        # If engine is buffering (hot sequence), queue the operation
+        # Don't validate inputs - they might be results from earlier buffered ops
+        if hasattr(self.engine, 'is_buffering') and self.engine.is_buffering():
+            params = {}
+            if hasattr(cmd, 'axis') and cmd.axis is not None:
+                params['axis'] = cmd.axis
+            if hasattr(cmd, 'keepdims'):
+                params['keepdims'] = cmd.keepdims
+
+            op = Operation(
+                op_type='unary',
+                op_name=cmd.op,
+                result_id=cmd.result_id,
+                input_ids=[cmd.input_id],
+                params=params if params else None
+            )
+            self.engine.queue_operation(op, self.tensors)
+            return WorkerResponse(success=True)
+
+        # Otherwise execute eagerly - validate inputs
         if cmd.input_id not in self.tensors:
             return WorkerResponse(success=False, error="Input tensor not found")
 
         input_tensor = self.tensors[cmd.input_id]
 
         if cmd.op == "exp":
-            result = np.exp(input_tensor) if self.backend_name == "numpy" else input_tensor.exp()  # TODO: add to engine
+            result = np.exp(input_tensor) if self.backend_name == "numpy" else input_tensor.exp()
         elif cmd.op == "log":
-            result = np.log(input_tensor) if self.backend_name == "numpy" else input_tensor.log()  # TODO: add to engine
+            result = np.log(input_tensor) if self.backend_name == "numpy" else input_tensor.log()
         elif cmd.op == "sum":
-            # Pass axis and keepdims for axis-aware reductions
             axis = getattr(cmd, 'axis', None)
             keepdims = getattr(cmd, 'keepdims', False)
             result = self.engine.sum(input_tensor, axis=axis, keepdims=keepdims)
@@ -437,12 +278,25 @@ class Worker:
         """Execute reshape operation (reshape, unsqueeze, squeeze)."""
         self.stats['operations']['total'] += 1
 
+        # If engine is buffering (hot sequence), queue the operation
+        # Don't validate inputs - they might be results from earlier buffered ops
+        if hasattr(self.engine, 'is_buffering') and self.engine.is_buffering():
+            op = Operation(
+                op_type='reshape',
+                op_name=cmd.op,
+                result_id=cmd.result_id,
+                input_ids=[cmd.input_id],
+                params=cmd.params
+            )
+            self.engine.queue_operation(op, self.tensors)
+            return WorkerResponse(success=True)
+
+        # Otherwise execute eagerly - validate inputs
         if cmd.input_id not in self.tensors:
             return WorkerResponse(success=False, error="Input tensor not found")
 
         input_tensor = self.tensors[cmd.input_id]
 
-        # Execute reshape operation using PyTorch/NumPy primitives
         if cmd.op == "reshape":
             new_shape = cmd.params
             if self.backend_name == "pytorch":
@@ -457,13 +311,11 @@ class Worker:
                 result = np.expand_dims(input_tensor, axis=dim)
         elif cmd.op == "squeeze":
             if len(cmd.params) == 0:
-                # Squeeze all dimensions of size 1
                 if self.backend_name == "pytorch":
                     result = input_tensor.squeeze()
                 else:
                     result = np.squeeze(input_tensor)
             else:
-                # Squeeze specific dimension
                 dim = cmd.params[0]
                 if self.backend_name == "pytorch":
                     result = input_tensor.squeeze(dim)
@@ -479,12 +331,25 @@ class Worker:
         """Execute slice operation (tensor subscripting)."""
         self.stats['operations']['total'] += 1
 
+        # If engine is buffering (hot sequence), queue the operation
+        # Don't validate inputs - they might be results from earlier buffered ops
+        if hasattr(self.engine, 'is_buffering') and self.engine.is_buffering():
+            op = Operation(
+                op_type='slice',
+                op_name='subscript',
+                result_id=cmd.result_id,
+                input_ids=[cmd.input_id],
+                params=cmd.key
+            )
+            self.engine.queue_operation(op, self.tensors)
+            return WorkerResponse(success=True)
+
+        # Otherwise execute eagerly - validate inputs
         if cmd.input_id not in self.tensors:
             return WorkerResponse(success=False, error="Input tensor not found")
 
         input_tensor = self.tensors[cmd.input_id]
 
-        # Execute slice operation - Python slicing works the same for PyTorch/NumPy
         try:
             result = input_tensor[cmd.key]
         except Exception as e:
@@ -499,10 +364,7 @@ class Worker:
             return WorkerResponse(success=False, error="Tensor not found")
 
         tensor = self.tensors[cmd.tensor_id]
-
-        # Convert to numpy for transport
         data = self.engine.to_numpy(tensor)
-
         return WorkerResponse(success=True, data=data)
 
     def _handle_free_tensor(self, cmd: WorkerFreeTensor) -> WorkerResponse:

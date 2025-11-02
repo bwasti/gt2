@@ -227,6 +227,18 @@ class WorkerCompileEnd(WorkerCommand):
 
 
 @dataclass
+class WorkerHotPathStart(WorkerCommand):
+    """Mark the start of a detected hot path sequence."""
+    sequence_id: str  # Unique ID for this hot sequence
+
+
+@dataclass
+class WorkerHotPathEnd(WorkerCommand):
+    """Mark the end of a detected hot path sequence."""
+    sequence_id: str  # Must match the corresponding START
+
+
+@dataclass
 class WorkerGetStats(WorkerCommand):
     """Request statistics from worker."""
     pass

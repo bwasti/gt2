@@ -29,9 +29,164 @@ class PyTorchCompileEngine(PyTorchEngine):
         self._cache_hits = 0
         self._cache_misses = 0
 
+        # Hot path buffering state
+        self._buffering = False
+        self._current_sequence_id: Optional[str] = None
+        self._buffer: List = []  # Buffer operations during hot sequence
+
     def supports_batching(self) -> bool:
         """This engine supports batching for compilation."""
         return True
+
+    def is_buffering(self) -> bool:
+        """Check if currently buffering a hot sequence."""
+        return self._buffering
+
+    def handle_hotpath_start(self, sequence_id: str):
+        """Begin buffering operations for compilation."""
+        self._buffering = True
+        self._current_sequence_id = sequence_id
+        self._buffer = []
+        debug_print_compile(f"Engine: Started buffering hot sequence {sequence_id}")
+
+    def handle_hotpath_end(self, sequence_id: str):
+        """Compile and execute buffered operations."""
+        if not self._buffering:
+            debug_print_compile(f"Engine: WARNING - hotpath_end without start")
+            return
+
+        if sequence_id != self._current_sequence_id:
+            debug_print_compile(f"Engine: WARNING - sequence ID mismatch")
+            return
+
+        debug_print_compile(f"Engine: Compiling {len(self._buffer)} buffered operations")
+
+        # Operations are already in self._buffer as (Operation, tensors_dict)
+        # We need to extract them and compile
+        if self._buffer:
+            # Extract operations and merge tensor dicts
+            operations = []
+            all_tensors = {}
+            for op, tensors in self._buffer:
+                operations.append(op)
+                all_tensors.update(tensors)
+
+            # Execute as compiled batch
+            try:
+                self.execute_batch(operations, all_tensors)
+            except Exception as e:
+                debug_print_compile(f"Compilation failed: {e}")
+                # Fall back handled in execute_batch
+
+        # Reset buffering state
+        self._buffering = False
+        self._current_sequence_id = None
+        self._buffer = []
+
+    def queue_operation(self, operation: Operation, tensors: Dict[str, Any]):
+        """
+        Queue an operation for execution (buffer if in hot sequence, execute otherwise).
+
+        This is the main entry point for operations when using compilation.
+        """
+        if self._buffering:
+            # Buffer the operation
+            self._buffer.append((operation, tensors))
+        else:
+            # Execute immediately (eager mode)
+            self._execute_eager(operation, tensors)
+
+    def _execute_eager(self, operation: Operation, tensors: Dict[str, Any]):
+        """Execute a single operation eagerly (not compiled)."""
+        # This is essentially the same as execute_batch with 1 operation
+        # but without compilation
+        results = {}
+
+        op = operation
+        if op.op_type == 'binary':
+            left = tensors[op.input_ids[0]]
+            right = tensors[op.input_ids[1]]
+
+            if op.op_name == 'add':
+                result = left + right
+            elif op.op_name == 'sub':
+                result = left - right
+            elif op.op_name == 'mul':
+                result = left * right
+            elif op.op_name == 'div':
+                result = left / right
+            elif op.op_name == 'matmul':
+                result = self.torch.matmul(left, right)
+            elif op.op_name == 'gt':
+                result = (left > right).float()
+            else:
+                raise ValueError(f"Unknown binary op: {op.op_name}")
+
+            tensors[op.result_id] = result
+
+        elif op.op_type == 'unary':
+            input_tensor = tensors.get(op.input_ids[0]) if op.input_ids else None
+
+            if op.op_name == 'relu':
+                result = self.torch.relu(input_tensor)
+            elif op.op_name == 'sigmoid':
+                result = self.torch.sigmoid(input_tensor)
+            elif op.op_name == 'tanh':
+                result = self.torch.tanh(input_tensor)
+            elif op.op_name == 'exp':
+                result = self.torch.exp(input_tensor)
+            elif op.op_name == 'log':
+                result = self.torch.log(input_tensor)
+            elif op.op_name == 'sum':
+                params = op.params or {}
+                axis = params.get('axis', None)
+                keepdims = params.get('keepdims', False)
+                result = self.torch.sum(input_tensor, dim=axis, keepdim=keepdims)
+            elif op.op_name == 'mean':
+                params = op.params or {}
+                axis = params.get('axis', None)
+                keepdims = params.get('keepdims', False)
+                result = self.torch.mean(input_tensor, dim=axis, keepdim=keepdims)
+            elif op.op_name == 'sqrt':
+                result = self.torch.sqrt(input_tensor)
+            elif op.op_name == 'transpose':
+                result = input_tensor.transpose(-2, -1)
+            elif op.op_name == 'randn':
+                params = op.params or {}
+                shape = params.get('shape', ())
+                result = self.torch.randn(shape)
+            elif op.op_name == 'zeros':
+                params = op.params or {}
+                shape = params.get('shape', ())
+                result = self.torch.zeros(shape)
+            else:
+                raise ValueError(f"Unknown unary op: {op.op_name}")
+
+            tensors[op.result_id] = result
+
+        elif op.op_type == 'reshape':
+            input_tensor = tensors[op.input_ids[0]]
+
+            if op.op_name == 'reshape':
+                result = input_tensor.reshape(*op.params)
+            elif op.op_name == 'unsqueeze':
+                dim = op.params[0]
+                result = input_tensor.unsqueeze(dim)
+            elif op.op_name == 'squeeze':
+                if len(op.params) == 0:
+                    result = input_tensor.squeeze()
+                else:
+                    dim = op.params[0]
+                    result = input_tensor.squeeze(dim)
+            else:
+                raise ValueError(f"Unknown reshape op: {op.op_name}")
+
+            tensors[op.result_id] = result
+
+        elif op.op_type == 'slice':
+            input_tensor = tensors[op.input_ids[0]]
+            result = input_tensor[op.params]
+            tensors[op.result_id] = result
     def _compute_graph_signature(self, operations: List[Operation]) -> str:
         """
         Compute a signature for the computation graph.
@@ -245,7 +400,7 @@ class PyTorchCompileEngine(PyTorchEngine):
         # Small batches (1-2 ops) have overhead that outweighs compilation benefits
         MIN_COMPILE_BATCH_SIZE = 3
 
-        if not self.enable_compilation or len(operations) < MIN_COMPILE_BATCH_SIZE:
+        if len(operations) < MIN_COMPILE_BATCH_SIZE:
             # Fall back to eager execution for small batches
             return self._execute_eager(operations, tensors)
 

@@ -129,3 +129,19 @@ class Engine(ABC):
         Raises NotImplementedError for single-node engines like NumPy.
         """
         raise NotImplementedError(f"{self.__class__.__name__} does not support distributed all-reduce")
+
+    def handle_hotpath_start(self, sequence_id: str):
+        """
+        Handle start of hot path marker (no-op by default).
+
+        Compilation-capable engines can override to begin buffering operations.
+        """
+        pass
+
+    def handle_hotpath_end(self, sequence_id: str):
+        """
+        Handle end of hot path marker (no-op by default).
+
+        Compilation-capable engines can override to compile and execute buffered operations.
+        """
+        pass
