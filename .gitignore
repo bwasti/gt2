@@ -36,3 +36,4 @@ examples/qwen3/data/
 
 # Claude Code user-specific settings
 .claude/settings.local.json
+bleh*.py
