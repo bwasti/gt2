@@ -68,7 +68,7 @@ gt-server = "gt.server.__main__:main"
 gt-worker = "gt.worker.__main__:main"
 
 [tool.setuptools]
-packages = ["gt", "gt.client", "gt.dispatcher", "gt.worker", "gt.server", "gt.transport", "gt.scripts"]
+packages = ["gt", "gt.client", "gt.dispatcher", "gt.nn", "gt.worker", "gt.worker.engine", "gt.server", "gt.transport", "gt.scripts"]
 
 [tool.setuptools.package-data]
 gt = ["py.typed"]
