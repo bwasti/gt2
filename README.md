@@ -58,24 +58,24 @@ It may not look like it, but in the background GT automatically spins up an asyn
 📚 **[Read the full documentation](https://bwasti.github.io/gt)**
 
 ### Getting Started
-- [Installation](docs/installation.md) - Install GT and verify setup
-- [Usage Guide](docs/usage.md) - Auto-server mode and distributed setup
+- [Installation](https://bwasti.github.io/gt/#/installation) - Install GT and verify setup
+- [Usage Guide](https://bwasti.github.io/gt/#/usage) - Auto-server mode and distributed setup
 
 ### Client API
-- [Tensor Operations](docs/client/tensor-api.md) - Complete operation reference
-- [Autograd](docs/client/autograd.md) - Automatic differentiation
+- [Tensor Operations](https://bwasti.github.io/gt/#/client/tensor-api) - Complete operation reference
+- [Autograd](https://bwasti.github.io/gt/#/client/autograd) - Automatic differentiation
 
 ### Distributed Training
-- [Signal-Based Sharding](docs/dispatcher/signaling.md) - Configure parallelism strategies
-- [Tuning & Performance](docs/dispatcher/tuning.md) - Optimize performance
-- [Monitoring Tools](docs/dispatcher/monitoring.md) - Real-time monitoring and debugging
+- [Signal-Based Sharding](https://bwasti.github.io/gt/#/dispatcher/signaling) - Configure parallelism strategies
+- [Tuning & Performance](https://bwasti.github.io/gt/#/dispatcher/tuning) - Optimize performance
+- [Monitoring Tools](https://bwasti.github.io/gt/#/dispatcher/monitoring) - Real-time monitoring and debugging
 
 ### Workers
-- [Backends](docs/worker/backends.md) - PyTorch and NumPy backends
-- [Compilation](docs/worker/compilation.md) - JIT compilation with torch.compile
+- [Backends](https://bwasti.github.io/gt/#/worker/backends) - PyTorch and NumPy backends
+- [Compilation](https://bwasti.github.io/gt/#/worker/compilation) - JIT compilation with torch.compile
 
 ### Contributing
-- [Contributing Guide](docs/contributing.md) - Development workflow, testing, and PR guidelines
+- [Contributing Guide](https://bwasti.github.io/gt/#/contributing) - Development workflow, testing, and PR guidelines
 
 ## Examples
 
