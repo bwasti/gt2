@@ -207,9 +207,9 @@ class Dispatcher:
 
         self.instruction_stream = InstructionStream(log_file=log_file, console=console_log, monitor_socket=self.monitor_socket)  # Record all instructions for debugging/monitoring
 
-        # Stream modifiers
+        # Stream modifiers (signal-driven sharding)
         from gt.dispatcher.sharding_modifier import ShardingStreamModifier
-        self.sharding_modifier = ShardingStreamModifier(enabled=enable_sharding)
+        self.sharding_modifier = ShardingStreamModifier()
 
     def register_worker(self, worker_identity: bytes, worker_id: str):
         """Register a worker by its ZMQ identity."""
@@ -325,7 +325,17 @@ class Dispatcher:
                 cmd_type = type(cmd).__name__
                 self.instruction_stream.log("RECV", client_id, cmd_type, self._get_cmd_details(cmd))
 
-                response = self._process_command(cmd, client_id)
+                # Run command through sharding modifier (may yield multiple commands)
+                response = None
+                for modified_cmd in self.sharding_modifier.process(cmd):
+                    response = self._process_command(modified_cmd, client_id)
+                    # If any command fails, return that failure
+                    if not response.success:
+                        break
+
+                # If no commands were yielded, return success
+                if response is None:
+                    response = ClientResponse(success=True)
 
                 self.instruction_stream.log("SEND", client_id, cmd_type, f"success={response.success}")
                 conn.send(response)
@@ -369,10 +379,15 @@ class Dispatcher:
 
     def _handle_create_tensor(self, cmd: CreateTensor, client_id: str) -> ClientResponse:
         """Handle tensor creation."""
-        # Pick a worker (simple round-robin)
-        worker = self._pick_worker()
-        if not worker:
-            error_msg = f"""
+        # If sharding modifier specified a worker, use that. Otherwise use round-robin.
+        if cmd.worker_id is not None:
+            worker = self._get_worker(cmd.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {cmd.worker_id} not found")
+        else:
+            worker = self._pick_worker()
+            if not worker:
+                error_msg = f"""
 
 ======================================================================
 GT DISPATCHER ERROR: No workers available
@@ -392,7 +407,7 @@ Solutions:
 Current registered workers: {len(self.workers)}
 ======================================================================
 """
-            return ClientResponse(success=False, error=error_msg)
+                return ClientResponse(success=False, error=error_msg)
 
         # Create worker-local tensor ID
         worker_tensor_id = f"{client_id}_{cmd.tensor_id}"
@@ -412,14 +427,24 @@ Current registered workers: {len(self.workers)}
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
 
-        # Register tensor location
+        # Register tensor location (with shard info if sharded)
+        from gt.dispatcher.tensor_handle import ShardInfo
+        shard_info = None
+        if cmd.shard_info:
+            shard_info = ShardInfo(
+                axis=cmd.shard_info['axis'],
+                shard_index=cmd.shard_info['shard_index'],
+                num_shards=cmd.shard_info['num_shards']
+            )
+
         self.tensor_handles.register(
             client_id=client_id,
             tensor_id=cmd.tensor_id,
             worker_id=worker["id"],
             worker_tensor_id=worker_tensor_id,
             shape=cmd.shape,
-            dtype=cmd.dtype
+            dtype=cmd.dtype,
+            shard_info=shard_info
         )
 
         return ClientResponse(success=True)
@@ -528,16 +553,15 @@ Current registered workers: {len(self.workers)}
         """Handle unary operation."""
         # For ops like randn that don't have inputs
         if cmd.input_id is None:
-            # SHARDING LOGIC: If we have multiple workers, shard across workers
-            num_workers = len(self.workers)
-            if num_workers > 1 and cmd.shape and len(cmd.shape) >= 2:
-                # Shard along axis 0 (rows)
-                return self._handle_sharded_creation(cmd, client_id, shard_axis=0)
-
-            # Single worker or non-shardable - use old logic
-            worker = self._pick_worker()
-            if not worker:
-                error_msg = f"""
+            # If sharding modifier specified a worker, use that. Otherwise use round-robin.
+            if cmd.worker_id is not None:
+                worker = self._get_worker(cmd.worker_id)
+                if not worker:
+                    return ClientResponse(success=False, error=f"Worker {cmd.worker_id} not found")
+            else:
+                worker = self._pick_worker()
+                if not worker:
+                    error_msg = f"""
 
 ======================================================================
 GT DISPATCHER ERROR: No workers available
@@ -557,7 +581,7 @@ Solutions:
 Current registered workers: {len(self.workers)}
 ======================================================================
 """
-                return ClientResponse(success=False, error=error_msg)
+                    return ClientResponse(success=False, error=error_msg)
 
             result_tensor_id = f"{client_id}_{cmd.result_id}"
 
@@ -578,13 +602,23 @@ Current registered workers: {len(self.workers)}
             if not worker_response.success:
                 return ClientResponse(success=False, error=worker_response.error)
 
+            from gt.dispatcher.tensor_handle import ShardInfo
+            shard_info = None
+            if cmd.shard_info:
+                shard_info = ShardInfo(
+                    axis=cmd.shard_info['axis'],
+                    shard_index=cmd.shard_info['shard_index'],
+                    num_shards=cmd.shard_info['num_shards']
+                )
+
             self.tensor_handles.register(
                 client_id=client_id,
                 tensor_id=cmd.result_id,
                 worker_id=worker["id"],
                 worker_tensor_id=result_tensor_id,
                 shape=cmd.shape,
-                dtype=cmd.dtype
+                dtype=cmd.dtype,
+                shard_info=shard_info
             )
 
             return ClientResponse(success=True)

@@ -65,6 +65,11 @@ def main():
     if args.log_file:
         print(f"Writing operation log to: {args.log_file}")
 
+    # Load configuration from environment variable (if set)
+    from gt.config import get_config
+    config = get_config()
+    config.load_from_env('GT_CONFIG')
+
     # Spawn workers if requested
     if args.spawn_gpu_workers > 0:
         print(f"Spawning {args.spawn_gpu_workers} GPU worker(s)...")

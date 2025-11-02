@@ -1,0 +1,193 @@
+# 8-GPU Sharding Configuration for Transformer Training
+# Architecture: 2-way Tensor Parallel × 4-way Pipeline Parallel
+#
+# GPU Layout (Better for ZB-V pipeline schedules):
+#   Pipeline Stage 0 (Layers 0-1): GPUs 0, 1 (tensor parallel)
+#   Pipeline Stage 1 (Layers 2-3): GPUs 2, 3 (tensor parallel)
+#   Pipeline Stage 2 (Layers 4-5): GPUs 4, 5 (tensor parallel)
+#   Pipeline Stage 3 (Layers 6-7): GPUs 6, 7 (tensor parallel)
+#
+# More pipeline stages = less bubble time with 1F1B/ZB-V schedules
+
+# =============================================================================
+# PIPELINE STAGE 0 - Layers 0-1 on GPUs 0-1
+# =============================================================================
+
+pp_stage0:
+  shard:
+    axis: 0
+    workers: [0, 1]
+  backward: pp_stage0_bwd
+
+pp_stage0_bwd:
+  shard:
+    axis: 0
+    workers: [0, 1]
+
+pp_stage0_colpar:
+  shard:
+    axis: 1
+    workers: [0, 1]
+  backward: pp_stage0_colpar_bwd
+
+pp_stage0_colpar_bwd:
+  shard:
+    axis: 1
+    workers: [0, 1]
+
+pp_stage0_rowpar:
+  shard:
+    axis: 0
+    workers: [0, 1]
+  backward: pp_stage0_rowpar_bwd
+
+pp_stage0_rowpar_bwd:
+  shard:
+    axis: 0
+    workers: [0, 1]
+
+# =============================================================================
+# PIPELINE STAGE 1 - Layers 2-3 on GPUs 2-3
+# =============================================================================
+
+pp_stage1:
+  shard:
+    axis: 0
+    workers: [2, 3]
+  backward: pp_stage1_bwd
+
+pp_stage1_bwd:
+  shard:
+    axis: 0
+    workers: [2, 3]
+
+pp_stage1_colpar:
+  shard:
+    axis: 1
+    workers: [2, 3]
+  backward: pp_stage1_colpar_bwd
+
+pp_stage1_colpar_bwd:
+  shard:
+    axis: 1
+    workers: [2, 3]
+
+pp_stage1_rowpar:
+  shard:
+    axis: 0
+    workers: [2, 3]
+  backward: pp_stage1_rowpar_bwd
+
+pp_stage1_rowpar_bwd:
+  shard:
+    axis: 0
+    workers: [2, 3]
+
+# =============================================================================
+# PIPELINE STAGE 2 - Layers 4-5 on GPUs 4-5
+# =============================================================================
+
+pp_stage2:
+  shard:
+    axis: 0
+    workers: [4, 5]
+  backward: pp_stage2_bwd
+
+pp_stage2_bwd:
+  shard:
+    axis: 0
+    workers: [4, 5]
+
+pp_stage2_colpar:
+  shard:
+    axis: 1
+    workers: [4, 5]
+  backward: pp_stage2_colpar_bwd
+
+pp_stage2_colpar_bwd:
+  shard:
+    axis: 1
+    workers: [4, 5]
+
+pp_stage2_rowpar:
+  shard:
+    axis: 0
+    workers: [4, 5]
+  backward: pp_stage2_rowpar_bwd
+
+pp_stage2_rowpar_bwd:
+  shard:
+    axis: 0
+    workers: [4, 5]
+
+# =============================================================================
+# PIPELINE STAGE 3 - Layers 6-7 on GPUs 6-7
+# =============================================================================
+
+pp_stage3:
+  shard:
+    axis: 0
+    workers: [6, 7]
+  backward: pp_stage3_bwd
+
+pp_stage3_bwd:
+  shard:
+    axis: 0
+    workers: [6, 7]
+
+pp_stage3_colpar:
+  shard:
+    axis: 1
+    workers: [6, 7]
+  backward: pp_stage3_colpar_bwd
+
+pp_stage3_colpar_bwd:
+  shard:
+    axis: 1
+    workers: [6, 7]
+
+pp_stage3_rowpar:
+  shard:
+    axis: 0
+    workers: [6, 7]
+  backward: pp_stage3_rowpar_bwd
+
+pp_stage3_rowpar_bwd:
+  shard:
+    axis: 0
+    workers: [6, 7]
+
+# =============================================================================
+# CROSS-STAGE COMMUNICATION (Pipeline boundaries)
+# =============================================================================
+
+stage0_to_stage1:
+  shard:
+    axis: 0
+    workers: [2, 3]
+
+stage1_to_stage2:
+  shard:
+    axis: 0
+    workers: [4, 5]
+
+stage2_to_stage3:
+  shard:
+    axis: 0
+    workers: [6, 7]
+
+# Backward gradient flow (reverse direction)
+stage3_to_stage2:
+  shard:
+    axis: 0
+    workers: [4, 5]
+
+stage2_to_stage1:
+  shard:
+    axis: 0
+    workers: [2, 3]
+
+stage1_to_stage0:
+  shard:
+    axis: 0
+    workers: [0, 1]

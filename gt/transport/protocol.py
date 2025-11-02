@@ -25,6 +25,8 @@ class CreateTensor(ClientCommand):
     dtype: str
     shape: tuple
     signal: Optional[str] = None  # Signal name for sharding config
+    worker_id: Optional[int] = None  # Specific worker to target (set by sharding modifier)
+    shard_info: Optional[dict] = None  # Shard metadata (axis, index, num_shards)
 
 
 @dataclass
@@ -49,6 +51,8 @@ class UnaryOp(ClientCommand):
     # For reduction operations (sum, mean, etc.)
     axis: Optional[int] = None  # Axis to reduce over (None = all axes)
     keepdims: bool = False  # Whether to keep reduced dimensions
+    worker_id: Optional[int] = None  # Specific worker to target (set by sharding modifier)
+    shard_info: Optional[dict] = None  # Shard metadata (axis, index, num_shards)
 
 
 @dataclass
