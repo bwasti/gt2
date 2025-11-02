@@ -174,6 +174,40 @@ Useful for:
 - Identifying slow operations (large timestamp gaps)
 - Understanding distributed execution flow
 
+## Instruction Tape Visualization
+
+Generate timeline visualizations showing operation flow through the system:
+
+```bash
+# 1. Run with instruction logging enabled
+GT_INSTRUCTION_LOG=/tmp/debug.log python your_script.py
+
+# 2. Generate visualization
+python -m gt.scripts.visualize /tmp/debug.log --output timeline.png --dpi 200
+```
+
+The visualizer requires matplotlib:
+```bash
+pip install matplotlib
+# or: pip install "gt[viz]"
+```
+
+Output shows:
+- Timeline lanes for Client, Dispatcher, and each Worker
+- Color-coded operations (MatMul, BinaryOp, UnaryOp, etc.)
+- Event types indicated by marker shapes (RECV, WORKER_SEND, WORKER_RECV)
+- Data transfer sizes indicated by marker sizes
+- Communication arrows showing instruction flow between components
+- Instruction IDs annotated on key events
+
+Use cases:
+- Identify idle workers or unbalanced load
+- Visualize distributed operation patterns (embarrassingly parallel, all-gather, all-reduce)
+- Find communication bottlenecks
+- Debug distributed execution issues
+
+See `gt/scripts/README.md` for complete documentation.
+
 ## Debug Utilities
 
 Inspect internal state:
@@ -221,16 +255,34 @@ This replaces the previous TCP implementation and provides better performance fo
 
 ## Installation
 
+### From GitHub (pip)
+
+```bash
+# Basic installation
+pip install git+https://github.com/bwasti/gt.git
+
+# With PyTorch backend (recommended)
+pip install "git+https://github.com/bwasti/gt.git#egg=gt[all]"
+
+# With visualization tools
+pip install "git+https://github.com/bwasti/gt.git#egg=gt[viz]"
+
+# Everything
+pip install "git+https://github.com/bwasti/gt.git#egg=gt[all,viz]"
+```
+
+### From Source (editable)
+
 ```bash
 # Clone repository
 git clone https://github.com/bwasti/gt.git
 cd gt
 
-# Install dependencies
-pip install -r requirements.txt
+# Install in editable mode
+pip install -e ".[all]"
 
-# Optional: Install PyTorch for GPU support
-pip install torch
+# Or with visualization support
+pip install -e ".[all,viz]"
 ```
 
 ## Usage
@@ -286,15 +338,38 @@ c = a @ b
 
 ## Environment Variables
 
+### Configuration
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `GT_CONFIG` | Path to sharding config YAML | None |
+| `GT_AUTO_COMPILE` | Enable automatic hot path detection and compilation | 0 |
+| `GT_COMPILE` | Force compile all operations | 0 |
+| `GT_WORKER_BATCH_SIZE` | Number of operations to batch per worker | 1 |
+
+### Debug Output
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GT_VERBOSE` | Enable framework status messages (startup, connections) | 0 |
+| `GT_DEBUG_CLIENT` | Enable client-side debug messages | 0 |
+| `GT_DEBUG_DISPATCHER` | Enable dispatcher debug messages | 0 |
+| `GT_DEBUG_WORKER` | Enable worker debug messages | 0 |
+| `GT_DEBUG_COMPILE` | Enable compilation debug messages | 0 |
+
+### Logging
+
+| Variable | Description | Default |
+|----------|-------------|---------|
 | `GT_INSTRUCTION_LOG` | Path to instruction stream log file | None |
+
+By default, GT produces no output except errors. Use `GT_VERBOSE=1` to see startup messages.
 
 Example:
 ```bash
 GT_CONFIG=sharding.yaml \
 GT_INSTRUCTION_LOG=debug.log \
+GT_VERBOSE=1 \
 python train.py
 ```
 
@@ -468,6 +543,7 @@ See [examples/](examples/) directory:
 - `signal_demo.py` - Signal-based sharding demonstration
 - `compile_demo.py` - Compilation directives demonstration
 - `debug_demo.py` - Debug utilities demonstration
+- `visualize_demo.py` - Instruction tape visualization demonstration
 - `config_sharding.yaml` - Example sharding configuration
 - `config_compile.yaml` - Example compilation configuration
 - `demo.py` - Basic tensor operations
