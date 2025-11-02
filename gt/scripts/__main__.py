@@ -1,0 +1,35 @@
+"""
+GT Scripts module entry point.
+
+Usage:
+    python -m gt.scripts.visualize <tape_log_path>
+"""
+
+import sys
+import os
+
+if __name__ == '__main__':
+    # Determine which script to run based on command line
+    if len(sys.argv) < 2:
+        print("GT Scripts")
+        print("\nAvailable commands:")
+        print("  visualize <tape_log_path>  - Visualize instruction tape timeline")
+        print("\nUsage:")
+        print("  python -m gt.scripts.visualize <tape_log_path> [--output <path>] [--dpi <dpi>]")
+        sys.exit(1)
+
+    command = sys.argv[1]
+
+    if command == 'visualize' or command.endswith('.log'):
+        # If first arg is a log file, run visualize
+        from gt.scripts.visualize import main
+        if command.endswith('.log'):
+            # Shift args so visualize gets the log path as first arg
+            sys.argv = ['visualize'] + sys.argv[1:]
+        else:
+            sys.argv = sys.argv[1:]  # Remove 'visualize' from args
+        main()
+    else:
+        print(f"Unknown command: {command}")
+        print("Available commands: visualize")
+        sys.exit(1)

@@ -113,3 +113,38 @@ c = a @ b              # Distributed: each worker computes A_shard @ B
 - Sharding happens along axis 0 (rows)
 - Tensors created from `from_numpy()` are **not** auto-sharded
 - Created tensors (`randn`, `zeros`, etc.) **are** auto-sharded
+
+---
+
+## Tape Visualization (`visualize_demo.py`)
+
+Demonstrates GT's instruction tape visualization for debugging and performance analysis.
+
+### Usage
+
+```bash
+# 1. Run with tape logging enabled
+GT_INSTRUCTION_LOG=/tmp/demo_tape.log python examples/visualize_demo.py
+
+# 2. Visualize the tape
+python -m gt.scripts.visualize /tmp/demo_tape.log --output timeline.png --dpi 200
+```
+
+### What It Shows
+
+The visualizer generates a high-resolution timeline showing:
+- **Client-Dispatcher-Worker communication flow**
+- **Operation types** (color-coded: MatMul=red, BinaryOp=blue, ReLU=dark gray, etc.)
+- **Event types** (marker shapes: ○=RECV, >=WORKER_SEND, <=WORKER_RECV)
+- **Data movement** (marker size indicates transfer size)
+- **Instruction sequence** (numbered annotations)
+- **Cross-component arrows** showing communication patterns
+
+### Use Cases
+
+- **Debug distributed operations** - See exactly when and where operations execute
+- **Identify bottlenecks** - Find idle workers or communication overhead
+- **Understand sharding** - Visualize how work is distributed across workers
+- **Optimize performance** - Spot opportunities for batching or pipelining
+
+See `gt/scripts/README.md` for complete documentation.
