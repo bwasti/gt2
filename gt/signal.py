@@ -122,17 +122,17 @@ def context(name: str, backward: Optional[str] = None):
         with gt.signal.context('layer1', backward='layer1_bwd'):
             x = a + b  # Forward uses 'layer1', backward uses 'layer1_bwd'
     """
-    from gt.client.tensor import _client_connection, _connection_lock
+    from gt.client import tensor as tensor_module
     from gt.transport.protocol import CompileStart, CompileEnd
     from gt import _ensure_connected
 
     # Ensure connection exists before sending CompileStart
     _ensure_connected()
 
-    if _client_connection:
-        with _connection_lock:
-            _client_connection.send(CompileStart(signal_name=name))
-            response = _client_connection.recv()
+    if tensor_module._client_connection:
+        with tensor_module._connection_lock:
+            tensor_module._client_connection.send(CompileStart(signal_name=name))
+            response = tensor_module._client_connection.recv()
             if not response.success:
                 raise RuntimeError(f"CompileStart failed: {response.error}")
 
@@ -143,10 +143,10 @@ def context(name: str, backward: Optional[str] = None):
     finally:
         _signal_stack.pop()
 
-        if _client_connection:
-            with _connection_lock:
-                _client_connection.send(CompileEnd(signal_name=name))
-                response = _client_connection.recv()
+        if tensor_module._client_connection:
+            with tensor_module._connection_lock:
+                tensor_module._client_connection.send(CompileEnd(signal_name=name))
+                response = tensor_module._client_connection.recv()
                 if not response.success:
                     raise RuntimeError(f"CompileEnd failed: {response.error}")
 
@@ -193,17 +193,17 @@ def enter(name: str, backward: Optional[str] = None):
         x = a + b
         gt.signal.exit('layer1')
     """
-    from gt.client.tensor import _client_connection, _connection_lock
+    from gt.client import tensor as tensor_module
     from gt.transport.protocol import CompileStart
     from gt import _ensure_connected
 
     # Ensure connection exists before sending CompileStart
     _ensure_connected()
 
-    if _client_connection:
-        with _connection_lock:
-            _client_connection.send(CompileStart(signal_name=name))
-            response = _client_connection.recv()
+    if tensor_module._client_connection:
+        with tensor_module._connection_lock:
+            tensor_module._client_connection.send(CompileStart(signal_name=name))
+            response = tensor_module._client_connection.recv()
             if not response.success:
                 raise RuntimeError(f"CompileStart failed: {response.error}")
 
@@ -221,7 +221,7 @@ def exit(name: str):
     Raises:
         RuntimeError: If name doesn't match current scope
     """
-    from gt.client.tensor import _client_connection, _connection_lock
+    from gt.client import tensor as tensor_module
     from gt.transport.protocol import CompileEnd
 
     current = _signal_stack.current()
@@ -232,9 +232,9 @@ def exit(name: str):
 
     _signal_stack.pop()
 
-    if _client_connection:
-        with _connection_lock:
-            _client_connection.send(CompileEnd(signal_name=name))
-            response = _client_connection.recv()
+    if tensor_module._client_connection:
+        with tensor_module._connection_lock:
+            tensor_module._client_connection.send(CompileEnd(signal_name=name))
+            response = tensor_module._client_connection.recv()
             if not response.success:
                 raise RuntimeError(f"CompileEnd failed: {response.error}")
