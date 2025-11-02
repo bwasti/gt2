@@ -963,8 +963,8 @@ Current registered workers: {len(self.workers)}
             dtype=input_locs[0].dtype,
             shape=result_data.shape
         )
-        self._send_to_worker(worker, create_cmd)
-        worker_response, _ = self._recv_from_worker(worker)
+        self._send_to_worker(first_worker, create_cmd)
+        worker_response, _ = self._recv_from_worker(first_worker)
 
         if not worker_response.success:
             return ClientResponse(success=False, error=worker_response.error)
