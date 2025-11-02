@@ -3,7 +3,7 @@
 A multiplexing tensor framework.
 
 ```bash
-pip install "git+https://github.com/bwasti/gt.git#egg=gt[all,viz]"
+pip install git+https://github.com/bwasti/gt.git
 python -c 'import gt; print(gt.randn(2,2))'
 ```
 
@@ -193,11 +193,7 @@ GT_INSTRUCTION_LOG=/tmp/debug.log python your_script.py
 python -m gt.scripts.visualize /tmp/debug.log --output timeline.png --dpi 200
 ```
 
-The visualizer requires matplotlib:
-```bash
-pip install matplotlib
-# or: pip install "gt[viz]"
-```
+The visualizer is included with GT (matplotlib is a core dependency).
 
 Output shows:
 - Timeline lanes for Client, Dispatcher, and each Worker
@@ -229,11 +225,7 @@ python -m gt.scripts.top
 python -m gt.scripts.top --port 9000 --host localhost
 ```
 
-The monitor requires pyzmq and rich:
-```bash
-pip install pyzmq rich psutil
-# or: pip install "gt[monitor]"
-```
+The monitor is included with GT (pyzmq, rich, and psutil are core dependencies).
 
 Features:
 - **Real-time EMA-smoothed activity bars** showing operation breakdown per worker
@@ -294,10 +286,10 @@ gt.debug.print_worker_stats()
 
 ## Multiple Backends
 
-- **PyTorch**: GPU support, compilation, distributed primitives
-- **NumPy**: CPU-only reference implementation
+- **PyTorch** (default): GPU support, compilation, distributed primitives
+- **NumPy**: CPU-only reference implementation (for testing)
 
-Workers use PyTorch when batching is enabled or multiple workers are present.
+Workers use PyTorch by default for both GPU and CPU execution.
 
 ## High-Performance Transport Layer
 
@@ -323,17 +315,8 @@ This replaces the previous TCP implementation and provides better performance fo
 ### From GitHub (pip)
 
 ```bash
-# Basic installation
+# Install GT (batteries included: PyTorch, visualization, monitoring)
 pip install git+https://github.com/bwasti/gt.git
-
-# With PyTorch backend (recommended)
-pip install "git+https://github.com/bwasti/gt.git#egg=gt[all]"
-
-# With visualization tools
-pip install "git+https://github.com/bwasti/gt.git#egg=gt[viz]"
-
-# Everything
-pip install "git+https://github.com/bwasti/gt.git#egg=gt[all,viz]"
 ```
 
 ### From Source (editable)
@@ -344,11 +327,14 @@ git clone https://github.com/bwasti/gt.git
 cd gt
 
 # Install in editable mode
-pip install -e ".[all]"
-
-# Or with visualization support
-pip install -e ".[all,viz]"
+pip install -e .
 ```
+
+**Included by default:**
+- PyTorch (GPU/CPU support, compilation)
+- matplotlib (timeline visualizations)
+- rich + psutil (real-time monitoring)
+- NumPy, pytest, pyzmq, pyyaml
 
 ## Usage
 
