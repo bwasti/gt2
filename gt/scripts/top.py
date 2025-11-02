@@ -233,16 +233,36 @@ class RealtimeMonitor:
 
     def generate_display(self) -> Table:
         """Generate rich table for display."""
+        # Get terminal width dynamically
+        console = Console()
+        term_width = console.width
+
+        # Calculate column widths based on terminal size
+        # Worker column: fixed at 15 chars
+        # Activity bar: 30% of available width (min 30, max 60)
+        # Details: Rest of the space (gets more room)
+        worker_width = 15
+
+        # Account for borders, padding, and separators (~10 chars)
+        available_width = max(term_width - worker_width - 10, 60)
+
+        # Activity bar: 30% of available width
+        activity_width = max(30, min(60, int(available_width * 0.3)))
+
+        # Details: Use remaining space (70% of available)
+        details_width = max(40, available_width - activity_width)
+
         table = Table(
             title=f"GT Worker Monitor - {self.host}:{self.port}",
             box=box.ROUNDED,
             show_header=True,
-            header_style="bold cyan"
+            header_style="bold cyan",
+            width=term_width
         )
 
-        table.add_column("Worker", style="cyan", no_wrap=True, width=15)
-        table.add_column("Activity", style="white", width=50)
-        table.add_column("Details", style="dim", width=40)
+        table.add_column("Worker", style="cyan", no_wrap=True, width=worker_width)
+        table.add_column("Activity", style="white", width=activity_width)
+        table.add_column("Details", style="dim", width=details_width)
 
         if not self.workers:
             table.add_row("No workers", "", "Waiting for events...")
@@ -252,17 +272,17 @@ class RealtimeMonitor:
         sorted_workers = sorted(self.workers.values(), key=lambda w: w.name)
 
         for worker in sorted_workers:
-            # Build activity bar
-            bar = self._build_activity_bar(worker)
+            # Build activity bar with dynamic width
+            bar = self._build_activity_bar(worker, bar_width=activity_width)
 
-            # Build details string
-            details = self._build_details(worker)
+            # Build details string with dynamic width
+            details = self._build_details(worker, max_width=details_width)
 
             table.add_row(worker.name, bar, details)
 
         return table
 
-    def _build_activity_bar(self, worker: WorkerStats) -> str:
+    def _build_activity_bar(self, worker: WorkerStats, bar_width: int = 50) -> str:
         """Build colored activity bar for worker."""
         # Get smoothed percentages
         percentages = []
@@ -279,8 +299,7 @@ class RealtimeMonitor:
         if total_pct > 0:
             percentages = [(op, (pct / total_pct) * 100) for op, pct in percentages]
 
-        # Build bar with 50 characters width
-        bar_width = 50
+        # Build bar with dynamic width
         bar_chars = []
 
         for op, pct in percentages:
@@ -291,15 +310,20 @@ class RealtimeMonitor:
 
         return ''.join(bar_chars)
 
-    def _build_details(self, worker: WorkerStats):
+    def _build_details(self, worker: WorkerStats, max_width: int = 40):
         """Build details string showing percentages with colored operation names."""
         from rich.text import Text
 
         result = Text()
         items = []
 
+        # Determine how many operations to show based on available width
+        # Each operation takes roughly 15-20 chars (e.g., "matmul: 42.5% | ")
+        # Be conservative to avoid wrapping
+        max_ops = max(3, max_width // 18)
+
         # Get top operations
-        top_ops = sorted(worker.ema_percentages.items(), key=lambda x: -x[1])[:3]
+        top_ops = sorted(worker.ema_percentages.items(), key=lambda x: -x[1])[:max_ops]
 
         for op, pct in top_ops:
             if pct > 0.5:
@@ -309,7 +333,8 @@ class RealtimeMonitor:
                 item.append(f": {pct:.1f}%", style="white")
                 items.append(item)
 
-        if worker.ema_idle > 0.5:
+        # Add idle if significant
+        if worker.ema_idle > 0.5 and len(items) < max_ops:
             idle_color = self.OP_COLORS['idle']
             item = Text()
             item.append("idle", style=f"bold {idle_color}")
