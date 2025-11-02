@@ -13,7 +13,12 @@
       "Bash(GT_VERBOSE=1 python:*)",
       "Bash(env GT_VERBOSE=1 python -c \"import gt; a = gt.randn(2, 2)\")",
       "Bash(GT_AUTO_COMPILE=1 python:*)",
-      "Bash(TORCH_LOGS=recompiles GT_AUTO_COMPILE=1 python:*)"
+      "Bash(TORCH_LOGS=recompiles GT_AUTO_COMPILE=1 python:*)",
+      "Bash(timeout 10 GT_AUTO_COMPILE=1 GT_DEBUG_COMPILE=1 python show_stats.py:*)",
+      "Bash(GT_AUTO_COMPILE=1 GT_DEBUG_COMPILE=1 timeout 10 python:*)",
+      "Bash(GT_AUTO_COMPILE=1 timeout 10 python:*)",
+      "Bash(pytest:*)",
+      "Bash(GT_INSTRUCTION_LOG=/tmp/gt_debug.log python:*)"
     ],
     "deny": [],
     "ask": []

@@ -409,17 +409,57 @@ Current registered workers: {len(self.workers)}
         left_sharded = len(left_locs) > 1
         right_sharded = len(right_locs) > 1
 
-        # DISTRIBUTED MATMUL: A @ B where A is sharded on axis 0
-        if cmd.op == "matmul" and left_sharded and not right_sharded:
-            return self._handle_distributed_matmul(cmd, client_id, left_locs, right_locs)
+        # DISTRIBUTED MATMUL: A @ B where A is sharded
+        if cmd.op == "matmul" and left_sharded:
+            if right_sharded:
+                # Both sharded: need all-gather for B
+                return self._handle_distributed_matmul_both_sharded(cmd, client_id, left_locs, right_locs)
+            else:
+                # Only A sharded: embarrassingly parallel
+                return self._handle_distributed_matmul(cmd, client_id, left_locs, right_locs)
 
         # Non-sharded case (or both on same worker)
         left_loc = left_locs[0]
         right_loc = right_locs[0]
 
-        # For now, assume they're on the same worker
+        # Handle cross-worker operations by moving one tensor to the other
         if left_loc.worker_id != right_loc.worker_id:
-            return ClientResponse(success=False, error="Cross-worker ops not yet supported")
+            # Move right tensor to left worker
+            left_worker = self._get_worker(left_loc.worker_id)
+            right_worker = self._get_worker(right_loc.worker_id)
+
+            if not left_worker or not right_worker:
+                return ClientResponse(success=False, error="Worker not found")
+
+            # Fetch right tensor data
+            get_cmd = WorkerGetData(tensor_id=right_loc.worker_tensor_id)
+            self._send_to_worker(right_worker, get_cmd)
+            right_response, _ = self._recv_from_worker(right_worker)
+
+            if not right_response.success:
+                return ClientResponse(success=False, error=f"Failed to fetch right tensor: {right_response.error}")
+
+            # Create right tensor on left worker
+            right_copy_id = f"{client_id}_{cmd.right_id}_copy"
+            create_cmd = WorkerCreateTensor(
+                tensor_id=right_copy_id,
+                data=right_response.data,
+                dtype=right_loc.dtype,
+                shape=right_loc.shape if right_loc.shape else right_response.data.shape
+            )
+            self._send_to_worker(left_worker, create_cmd)
+            create_response, _ = self._recv_from_worker(left_worker)
+
+            if not create_response.success:
+                return ClientResponse(success=False, error=f"Failed to create right tensor copy: {create_response.error}")
+
+            # Update right_loc to point to the copy on left worker
+            right_loc = type('obj', (object,), {
+                'worker_id': left_loc.worker_id,
+                'worker_tensor_id': right_copy_id,
+                'shape': right_loc.shape,
+                'dtype': right_loc.dtype
+            })()
 
         worker = self._get_worker(left_loc.worker_id)
         if not worker:
@@ -800,6 +840,94 @@ Current registered workers: {len(self.workers)}
         # Update the destination tensor's metadata to match source
         dest_loc.shape = src_loc.shape
         dest_loc.dtype = src_loc.dtype
+
+        return ClientResponse(success=True)
+
+    def _handle_distributed_matmul_both_sharded(self, cmd: BinaryOp, client_id: str, left_locs, right_locs) -> ClientResponse:
+        """
+        Handle distributed matmul: A @ B where both A and B are sharded on axis 0.
+
+        Strategy: All-gather B, then compute A_shard @ B_full on each worker.
+        Result is sharded on axis 0 (same as A).
+        """
+        from gt.dispatcher.tensor_handle import ShardInfo
+        from gt.transport.protocol import WorkerGetData, WorkerCreateTensor, WorkerBinaryOp
+        import numpy as np
+
+        # Step 1: All-gather B - collect all shards from workers
+        print(f"All-gathering B tensor (sharded across {len(right_locs)} workers)")
+        b_shards = []
+        for loc in right_locs:
+            worker = self._get_worker(loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
+
+            get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+            self._send_to_worker(worker, get_cmd)
+            response, _ = self._recv_from_worker(worker)
+
+            if not response.success:
+                return ClientResponse(success=False, error=f"Failed to get B shard from {loc.worker_id}")
+
+            b_shards.append(response.data)
+
+        # Concatenate B shards to get full B (shards are on axis 0)
+        b_full = np.concatenate(b_shards, axis=0)
+        print(f"All-gathered B: shape={b_full.shape}")
+
+        # Step 2: Distribute full B to each worker and compute A_shard @ B_full
+        for shard_idx, left_loc in enumerate(left_locs):
+            worker = self._get_worker(left_loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {left_loc.worker_id} not found")
+
+            # Create full B on this worker
+            b_full_id = f"{client_id}_{cmd.right_id}_full_worker{shard_idx}"
+            create_cmd = WorkerCreateTensor(
+                tensor_id=b_full_id,
+                data=b_full,
+                dtype=right_locs[0].dtype,
+                shape=b_full.shape
+            )
+            self._send_to_worker(worker, create_cmd)
+            create_response, _ = self._recv_from_worker(worker)
+
+            if not create_response.success:
+                return ClientResponse(success=False, error="Failed to create full B")
+
+            # Compute A_shard @ B_full on this worker
+            result_tensor_id = f"{client_id}_{cmd.result_id}_shard{shard_idx}"
+            matmul_cmd = WorkerBinaryOp(
+                result_id=result_tensor_id,
+                op="matmul",
+                left_id=left_loc.worker_tensor_id,
+                right_id=b_full_id
+            )
+            self._send_to_worker(worker, matmul_cmd)
+            matmul_response, _ = self._recv_from_worker(worker)
+
+            if not matmul_response.success:
+                return ClientResponse(success=False, error=f"Matmul failed on worker {left_loc.worker_id}")
+
+            # Register result shard
+            result_shape = list(left_loc.shape)
+            result_shape[-1] = b_full.shape[-1]  # Output columns from B
+
+            shard_info = ShardInfo(
+                axis=0,  # Result sharded on axis 0 (same as A)
+                num_shards=len(left_locs),
+                shard_index=shard_idx
+            )
+
+            self.tensor_handles.register(
+                client_id=client_id,
+                tensor_id=cmd.result_id,
+                worker_id=worker["id"],
+                worker_tensor_id=result_tensor_id,
+                shape=tuple(result_shape),
+                dtype=left_loc.dtype,
+                shard_info=shard_info
+            )
 
         return ClientResponse(success=True)
 
