@@ -10,7 +10,7 @@ import numpy as np
 import gt
 
 
-def test_isub_basic():
+def test_isub_basic(client):
     """Test basic in-place subtraction."""
     a = gt.tensor([5.0, 10.0], dtype='float32')
     b = gt.tensor([2.0, 3.0], dtype='float32')
@@ -32,7 +32,7 @@ def test_isub_basic():
     np.testing.assert_allclose(a.data.numpy(), expected)
 
 
-def test_isub_scalar():
+def test_isub_scalar(client):
     """Test in-place subtraction with scalar."""
     a = gt.tensor([10.0, 20.0], dtype='float32')
 
@@ -42,7 +42,7 @@ def test_isub_scalar():
     np.testing.assert_allclose(a.data.numpy(), expected)
 
 
-def test_isub_updates_parameter():
+def test_isub_updates_parameter(client):
     """Test that -= actually updates a parameter (key for gradient descent)."""
     # This simulates param -= lr * grad
     param = gt.tensor([1.0, 2.0, 3.0], dtype='float32')
@@ -61,7 +61,7 @@ def test_isub_updates_parameter():
     np.testing.assert_allclose(param.data.numpy(), expected, rtol=1e-5)
 
 
-def test_isub_sequence():
+def test_isub_sequence(client):
     """Test multiple in-place operations in sequence."""
     a = gt.tensor([10.0], dtype='float32')
 
@@ -75,7 +75,7 @@ def test_isub_sequence():
     assert np.isclose(a.data.numpy()[0], 4.0)
 
 
-def test_isub_independence():
+def test_isub_independence(client):
     """Test that in-place op on one tensor doesn't affect another."""
     a = gt.tensor([5.0, 10.0], dtype='float32')
     b = gt.tensor([2.0, 3.0], dtype='float32')
@@ -91,7 +91,7 @@ def test_isub_independence():
     np.testing.assert_array_equal(b_after, b_before)
 
 
-def test_isub_with_computation():
+def test_isub_with_computation(client):
     """Test -= with a more complex right-hand side."""
     a = gt.tensor([10.0, 20.0], dtype='float32')
     b = gt.tensor([2.0, 3.0], dtype='float32')
@@ -104,7 +104,7 @@ def test_isub_with_computation():
     np.testing.assert_allclose(a.data.numpy(), expected)
 
 
-def test_gradient_descent_step():
+def test_gradient_descent_step(client):
     """Test a full gradient descent step with -= (most realistic scenario)."""
     # This is the actual use case: updating parameters during training
 
@@ -147,7 +147,7 @@ def test_gradient_descent_step():
         np.testing.assert_allclose(new_weight, expected, rtol=1e-5)
 
 
-def test_multiple_parameter_updates():
+def test_multiple_parameter_updates(client):
     """Test updating multiple parameters independently."""
     param1 = gt.tensor([1.0, 2.0], dtype='float32')
     param2 = gt.tensor([3.0, 4.0], dtype='float32')
