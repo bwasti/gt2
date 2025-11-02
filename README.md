@@ -1,6 +1,6 @@
 # GT
 
-A distributed multiplexing tensor framework.  Top notch API.
+A multiplexing tensor framework.
 
 ```bash
 pip install "git+https://github.com/bwasti/gt.git#egg=gt[all,viz]"
