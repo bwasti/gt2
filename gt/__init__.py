@@ -357,9 +357,15 @@ def _cleanup():
         dispatcher = _auto_server
         dispatcher.running = False
         try:
-            if hasattr(dispatcher, 'server_socket'):
+            if hasattr(dispatcher, 'server_socket') and dispatcher.server_socket:
                 dispatcher.server_socket.close()
         except Exception:
             pass
+        try:
+            if hasattr(dispatcher, 'monitor_socket') and dispatcher.monitor_socket:
+                dispatcher.monitor_socket.close()
+        except Exception:
+            pass
+
 
 atexit.register(_cleanup)

@@ -200,8 +200,14 @@ class Dispatcher:
                 import zmq
                 context = zmq.Context()
                 self.monitor_socket = context.socket(zmq.PUB)
-                monitor_port = port + 1
-                self.monitor_socket.bind(f"tcp://{host}:{monitor_port}")
+                # Bind to any available port (0 means OS will choose)
+                if host in ('localhost', '127.0.0.1', '0.0.0.0'):
+                    # Use IPC for localhost
+                    monitor_addr = f"ipc:///tmp/gt_monitor_{port}.ipc"
+                else:
+                    # Use TCP with auto port selection
+                    monitor_addr = f"tcp://{host}:0"
+                self.monitor_socket.bind(monitor_addr)
             except Exception as e:
                 print(f"Warning: Could not create monitoring socket: {e}")
                 self.monitor_socket = None
