@@ -169,7 +169,7 @@ class Dispatcher:
     Takes commands from clients and schedules them to workers.
     """
 
-    def __init__(self, host="localhost", port=9000, log_file: str = None, console_log: bool = True):
+    def __init__(self, host="localhost", port=9000, log_file: str = None, console_log: bool = True, enable_sharding: bool = False):
         self.host = host
         self.port = port
         self.tensor_handles = TensorHandle()
@@ -178,6 +178,10 @@ class Dispatcher:
         self.running = False
         self.server_socket = None
         self.instruction_stream = InstructionStream(log_file=log_file, console=console_log)  # Record all instructions for debugging/monitoring
+
+        # Stream modifiers
+        from gt.dispatcher.sharding_modifier import ShardingStreamModifier
+        self.sharding_modifier = ShardingStreamModifier(enabled=enable_sharding)
 
     def register_worker(self, worker_identity: bytes, worker_id: str):
         """Register a worker by its ZMQ identity."""
