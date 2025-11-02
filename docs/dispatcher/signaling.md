@@ -73,6 +73,88 @@ hot_path:
   compile: true              # Enable torch.compile for this signal
 ```
 
+## Python Configuration API
+
+Instead of YAML files, you can configure signals programmatically from Python:
+
+```python
+import gt
+from gt import SignalConfig, ShardConfig
+
+# Create configuration
+config = SignalConfig(
+    shard=ShardConfig(
+        axis=0,
+        workers=[0, 1, 2, 3]
+    ),
+    backward_signal='backward_layer1',
+    compile=False
+)
+
+# Register it
+gt.register_config('forward_layer1', config)
+
+# Use it
+with gt.signal.context('forward_layer1'):
+    x = gt.randn(128, 64)
+```
+
+### Benefits of Python API
+
+- **Dynamic configuration** - Adjust based on runtime conditions
+- **Programmatic experimentation** - Easy to test different strategies
+- **No external files** - Embedded configurations in code
+- **Mix with YAML** - Python configs work alongside YAML
+
+### Examples
+
+**Data Parallelism:**
+```python
+from gt import SignalConfig, ShardConfig
+
+config = SignalConfig(
+    shard=ShardConfig(axis=0, workers=[0, 1, 2, 3])
+)
+gt.register_config('data_parallel', config)
+```
+
+**Pipeline Parallelism:**
+```python
+# Forward on workers [0, 1]
+forward_config = SignalConfig(
+    shard=ShardConfig(axis=0, workers=[0, 1]),
+    backward_signal='backward_stage'
+)
+gt.register_config('forward_stage', forward_config)
+
+# Backward on workers [2, 3]
+backward_config = SignalConfig(
+    shard=ShardConfig(axis=0, workers=[2, 3])
+)
+gt.register_config('backward_stage', backward_config)
+```
+
+**Dynamic Configuration:**
+```python
+def configure_for_batch_size(batch_size):
+    if batch_size >= 256:
+        workers = [0, 1, 2, 3]  # All workers
+    else:
+        workers = [0, 1]  # Fewer workers
+
+    config = SignalConfig(
+        shard=ShardConfig(axis=0, workers=workers)
+    )
+    gt.register_config('training', config)
+
+# Adjust based on batch size
+configure_for_batch_size(batch_size)
+with gt.signal.context('training'):
+    output = model(batch)
+```
+
+See `examples/config_from_python.py` for complete examples.
+
 ## API Reference
 
 ### Context Manager (Recommended)
@@ -129,15 +211,45 @@ gt.signal.exit('signal_name')
 
 ### Loading Configuration
 
+**Option 1: YAML File**
+
 ```python
-# Option 1: Environment variable (recommended)
+# Environment variable (recommended)
 import os
 os.environ['GT_CONFIG'] = 'config.yaml'
 import gt
 
-# Option 2: Explicit load
+# Explicit load
 import gt
 gt.load_config('config.yaml')
+```
+
+**Option 2: Python API**
+
+```python
+import gt
+from gt import SignalConfig, ShardConfig
+
+# Register configuration
+config = SignalConfig(
+    shard=ShardConfig(axis=0, workers=[0, 1, 2, 3])
+)
+gt.register_config('my_signal', config)
+```
+
+**Option 3: Mix Both**
+
+Python configs work alongside YAML - use YAML for static configs and Python for dynamic ones:
+
+```python
+# Load YAML base config
+gt.load_config('base_config.yaml')
+
+# Override or add with Python
+dynamic_config = SignalConfig(
+    shard=ShardConfig(axis=0, workers=[0, 1])
+)
+gt.register_config('dynamic_layer', dynamic_config)
 ```
 
 ## Sharding Strategies
