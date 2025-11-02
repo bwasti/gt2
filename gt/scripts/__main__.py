@@ -3,6 +3,7 @@ GT Scripts module entry point.
 
 Usage:
     python -m gt.scripts.visualize <tape_log_path>
+    python -m gt.scripts.top
 """
 
 import sys
@@ -14,8 +15,10 @@ if __name__ == '__main__':
         print("GT Scripts")
         print("\nAvailable commands:")
         print("  visualize <tape_log_path>  - Visualize instruction tape timeline")
+        print("  top [--pid PID]            - Real-time worker monitoring (htop-style)")
         print("\nUsage:")
         print("  python -m gt.scripts.visualize <tape_log_path> [--output <path>] [--dpi <dpi>]")
+        print("  python -m gt.scripts.top [log_path] [--pid PID]")
         sys.exit(1)
 
     command = sys.argv[1]
@@ -29,7 +32,11 @@ if __name__ == '__main__':
         else:
             sys.argv = sys.argv[1:]  # Remove 'visualize' from args
         main()
+    elif command == 'top':
+        from gt.scripts.top import main
+        sys.argv = sys.argv[1:]  # Remove 'top' from args
+        main()
     else:
         print(f"Unknown command: {command}")
-        print("Available commands: visualize")
+        print("Available commands: visualize, top")
         sys.exit(1)

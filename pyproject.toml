@@ -36,13 +36,21 @@ dev = [
     "pytest>=7.0.0",
     "torch>=2.0.0",
     "matplotlib>=3.5.0",
+    "rich>=10.0.0",
+    "psutil>=5.8.0",
 ]
 viz = [
     "matplotlib>=3.5.0",
 ]
+monitor = [
+    "rich>=10.0.0",
+    "psutil>=5.8.0",
+]
 all = [
     "torch>=2.0.0",
     "matplotlib>=3.5.0",
+    "rich>=10.0.0",
+    "psutil>=5.8.0",
 ]
 
 [project.urls]
