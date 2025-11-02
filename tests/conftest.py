@@ -22,35 +22,12 @@ def gt_system():
     """
     print("\n=== Starting GT system for testing ===")
 
-    # Start dispatcher in background thread
-    from gt.transport.connection import create_server, Connection
-
-    dispatcher = Dispatcher(host='localhost', port=9001)  # Use different port for tests
+    # Start dispatcher in background thread using its actual start() method
+    dispatcher = Dispatcher(host='localhost', port=9001, console_log=False)  # Use different port for tests
 
     def run_dispatcher():
-        server_sock = create_server('localhost', 9001)
-        print("Test dispatcher listening on localhost:9001")
-
-        # Accept worker connection
-        sock, addr = server_sock.accept()
-        conn = Connection(sock)
-        dispatcher.register_worker(conn, "test_worker")
-        print(f"Test worker connected")
-
-        # Accept client connections
-        while True:
-            try:
-                sock, addr = server_sock.accept()
-                conn = Connection(sock)
-                client_id = f"{addr[0]}:{addr[1]}"
-                thread = threading.Thread(
-                    target=dispatcher._handle_client,
-                    args=(conn, client_id),
-                    daemon=True
-                )
-                thread.start()
-            except:
-                break
+        print("Test dispatcher starting on localhost:9001")
+        dispatcher.start()  # Use the dispatcher's actual start() method which handles ZMQ properly
 
     dispatcher_thread = threading.Thread(target=run_dispatcher, daemon=True)
     dispatcher_thread.start()
@@ -71,6 +48,7 @@ def gt_system():
     yield  # Tests run here
 
     print("\n=== Shutting down GT system ===")
+    dispatcher.stop()
 
 
 @pytest.fixture(scope="session")
@@ -82,40 +60,12 @@ def gt_system_4workers():
     """
     print("\n=== Starting GT system with 4 workers for testing ===")
 
-    # Start dispatcher in background thread
-    from gt.transport.connection import create_server, Connection
-
-    dispatcher = Dispatcher(host='localhost', port=9002)  # Different port for 4-worker tests
-    dispatcher.running = True  # IMPORTANT!
+    # Start dispatcher in background thread using its actual start() method
+    dispatcher = Dispatcher(host='localhost', port=9002, console_log=False)  # Different port for 4-worker tests
 
     def run_dispatcher():
-        server_sock = create_server('localhost', 9002)
-        print("Test dispatcher (4 workers) listening on localhost:9002")
-
-        # Accept 4 worker connections
-        for i in range(4):
-            sock, addr = server_sock.accept()
-            conn = Connection(sock)
-            worker_id = f"test_worker_{i}"
-            dispatcher.register_worker(conn, worker_id)
-            print(f"Worker {worker_id} connected")
-
-        print("All 4 workers connected")
-
-        # Accept client connections
-        while True:
-            try:
-                sock, addr = server_sock.accept()
-                conn = Connection(sock)
-                client_id = f"{addr[0]}:{addr[1]}"
-                thread = threading.Thread(
-                    target=dispatcher._handle_client,
-                    args=(conn, client_id),
-                    daemon=True
-                )
-                thread.start()
-            except:
-                break
+        print("Test dispatcher (4 workers) starting on localhost:9002")
+        dispatcher.start()  # Use the dispatcher's actual start() method which handles ZMQ properly
 
     dispatcher_thread = threading.Thread(target=run_dispatcher, daemon=True)
     dispatcher_thread.start()
@@ -142,6 +92,7 @@ def gt_system_4workers():
     yield  # Tests run here
 
     print("\n=== Shutting down GT system with 4 workers ===")
+    dispatcher.stop()
 
 
 @pytest.fixture
