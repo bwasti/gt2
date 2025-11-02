@@ -37,41 +37,6 @@ Workers process operations one at a time as they arrive from the dispatcher, whi
 This keeps the architecture simple and easy to reason over.
 
 
-## Optimized for AI Development
-
-GT is designed to be understood, modified, and debugged with AI coding assistants:
-
-### 1. **Architecture Documentation for AI**
-- [CLAUDE.md](CLAUDE.md) provides detailed architectural context optimized for Claude and other AI assistants
-- Explicit codebase structure, design decisions, and implementation patterns
-- Helps AI quickly understand the system and make consistent changes
-
-### 2. **Declarative Configuration via YAML**
-- Sharding strategies defined in human-readable YAML configs
-- Easy for AI to parse, understand, and generate configurations
-- Clear mapping between signals and worker assignments
-- See [Signal-Based Sharding](#signal-based-sharding-configuration)
-
-### 3. **Debugging Utilities**
-- **Tape-based autograd** - Inspect gradient computation graph with `gt.debug.print_tape()`
-- **Instruction stream logging** - Track every operation with timestamps via `GT_INSTRUCTION_LOG`
-- **Worker statistics** - View operation counts and performance metrics
-- Makes it easy to identify bugs and understand execution flow
-
-### 4. **Comprehensive Test Suite**
-- 50+ tests covering tensor operations, autograd, distributed execution
-- Tests serve as executable documentation and specifications
-- Easy for AI to understand intended behavior and verify changes
-- See [Running Tests](#running-tests)
-
-### 5. **Standard API**
-- PyTorch-compatible API that AI models are already trained on
-- Familiar patterns like `Module`, `Linear`, `SGD`, `backward()`
-- Extensive inline documentation and type hints
-- Reduces cognitive load when making changes
-
-**Why this matters:** When collaborating with AI assistants, code clarity and debugging tools are multiplicative. This design enables rapid iteration, confident refactoring, and effective troubleshooting.
-
 ## Signal-Based Sharding Configuration
 
 Control tensor placement across workers using named signals and YAML configs:
@@ -310,6 +275,7 @@ GT uses **ZeroMQ (ZMQ)** for client-dispatcher-worker communication:
 
 This replaces the previous TCP implementation and provides better performance for the high message rate typical in distributed training workloads.
 
+
 ## Installation
 
 ### From GitHub (pip)
@@ -518,8 +484,8 @@ Note: GT adds communication/serialization overhead. For small operations this ov
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                          User Code                               │
-│  import gt                                                       │
+│                          User Code                              │
+│  import gt                                                      │
 │  with gt.signal.context('layer1'):                              │
 │      x = gt.randn(100, 64)                                      │
 │      loss = model(x)                                            │
@@ -528,27 +494,27 @@ Note: GT adds communication/serialization overhead. For small operations this ov
                        │ PyTorch-like API + Signal Metadata
                        │
 ┌──────────────────────▼──────────────────────────────────────────┐
-│                      gt/client/                                  │
-│  ┌──────────────┐  ┌─────────────┐  ┌──────────────┐          │
-│  │   Tensor     │  │  Autograd   │  │  nn.Module   │          │
-│  │ (Remote Data)│  │   (Tape)    │  │  (Layers)    │          │
-│  └──────────────┘  └─────────────┘  └──────────────┘          │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────┐           │
-│  │ Signal API: Tracks current signal scope         │           │
-│  │ Config: Loads YAML sharding strategies          │           │
-│  └─────────────────────────────────────────────────┘           │
+│                      gt/client/                                 │
+│  ┌──────────────┐  ┌─────────────┐  ┌──────────────┐            │
+│  │   Tensor     │  │  Autograd   │  │  nn.Module   │            │
+│  │ (Remote Data)│  │   (Tape)    │  │  (Layers)    │            │
+│  └──────────────┘  └─────────────┘  └──────────────┘            │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────┐            │
+│  │ Signal API: Tracks current signal scope         │            │
+│  │ Config: Loads YAML sharding strategies          │            │
+│  └─────────────────────────────────────────────────┘            │
 └──────────────────────┬──────────────────────────────────────────┘
                        │ ZMQ (DEALER → ROUTER with signal metadata)
                        │
 ┌──────────────────────▼──────────────────────────────────────────┐
-│                    gt/dispatcher/                                │
+│                    gt/dispatcher/                               │
 │  • ZMQ ROUTER socket handles all connections                    │
 │  • Reads signal configs from YAML                               │
 │  • Routes operations based on sharding strategy                 │
 │  • Logs instruction stream to file                              │
 │  • Handles multiple clients concurrently                        │
-└───────┬──────────────┬──────────────┬──────────────────────────┘
+└───────┬──────────────┬──────────────┬───────────────────────────┘
         │              │              │ ZMQ (DEALER ← ROUTER)
         │              │              │
     ┌───▼────┐    ┌───▼────┐    ┌───▼────┐
@@ -610,6 +576,39 @@ See [examples/](examples/) directory:
 ## Contributing
 
 Contributions welcome. This is a research prototype focused on simplicity and readability.
+
+## Optimized for AI Development
+
+GT is designed to be understood, modified, and debugged with AI coding assistants:
+
+### 1. **Architecture Documentation for AI**
+- [CLAUDE.md](CLAUDE.md) provides detailed architectural context optimized for Claude and other AI assistants
+- Explicit codebase structure, design decisions, and implementation patterns
+- Helps AI quickly understand the system and make consistent changes
+
+### 2. **Declarative Configuration via YAML**
+- Sharding strategies defined in human-readable YAML configs
+- Easy for AI to parse, understand, and generate configurations
+- Clear mapping between signals and worker assignments
+- See [Signal-Based Sharding](#signal-based-sharding-configuration)
+
+### 3. **Debugging Utilities**
+- **Tape-based autograd** - Inspect gradient computation graph with `gt.debug.print_tape()`
+- **Instruction stream logging** - Track every operation with timestamps via `GT_INSTRUCTION_LOG`
+- **Worker statistics** - View operation counts and performance metrics
+- Makes it easy to identify bugs and understand execution flow
+
+### 4. **Comprehensive Test Suite**
+- 50+ tests covering tensor operations, autograd, distributed execution
+- Tests serve as executable documentation and specifications
+- Easy for AI to understand intended behavior and verify changes
+- See [Running Tests](#running-tests)
+
+### 5. **Standard API**
+- PyTorch-compatible API that AI models are already trained on
+- Familiar patterns like `Module`, `Linear`, `SGD`, `backward()`
+- Extensive inline documentation and type hints
+- Reduces cognitive load when making changes
 
 ## License
 
