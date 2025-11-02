@@ -13,6 +13,27 @@ from gt.worker.worker import Worker
 from gt.client.client import Client
 
 
+def pytest_addoption(parser):
+    """Add custom command line options."""
+    parser.addoption(
+        "--backend",
+        action="store",
+        default="gt",
+        help="Backend to test: 'gt', 'pytorch', or 'both' (for test_mlp.py)"
+    )
+
+
+def pytest_generate_tests(metafunc):
+    """Generate test variants for different backends (used by test_mlp.py)."""
+    if "backend" in metafunc.fixturenames:
+        backend_option = metafunc.config.getoption("backend")
+        if backend_option == "both":
+            backends = ["gt", "pytorch"]
+        else:
+            backends = [backend_option]
+        metafunc.parametrize("backend", backends)
+
+
 @pytest.fixture(scope="session")
 def gt_system():
     """

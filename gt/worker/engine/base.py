@@ -59,7 +59,7 @@ class Engine(ABC):
         pass
 
     @abstractmethod
-    def sum(self, tensor: Any, axis: Optional[int] = None) -> Any:
+    def sum(self, tensor: Any, axis: Optional[int] = None, keepdims: bool = False) -> Any:
         """Sum reduction."""
         pass
 

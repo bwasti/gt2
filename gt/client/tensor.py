@@ -28,6 +28,21 @@ class TensorData:
         """Get the underlying numpy array."""
         return self._data
 
+    @property
+    def shape(self):
+        """Return the shape of the underlying data."""
+        return np.asarray(self._data).shape
+
+    @property
+    def dtype(self):
+        """Return the dtype of the underlying data."""
+        return np.asarray(self._data).dtype
+
+    def __array__(self) -> np.ndarray:
+        """Allow numpy to automatically convert this to an array."""
+        # Ensure we always return an ndarray (convert scalars to 0-d arrays)
+        return np.asarray(self._data)
+
     def __repr__(self):
         return repr(self._data)
 

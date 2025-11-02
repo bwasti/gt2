@@ -84,6 +84,9 @@ class PyTorchEngine(Engine):
         return self.torch.sqrt(tensor)
 
     def transpose(self, tensor):
+        # For 1D or 0D tensors, transpose is a no-op
+        if tensor.ndim < 2:
+            return tensor
         return self.torch.transpose(tensor, -2, -1)
 
     def supports_distributed(self) -> bool:

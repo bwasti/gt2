@@ -10,30 +10,12 @@ Usage:
 
     # Run both
     pytest tests/test_mlp.py --backend=both
+
+Note: The --backend option is configured in conftest.py
 """
 
 import pytest
 import numpy as np
-
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--backend",
-        action="store",
-        default="gt",
-        help="Backend to test: 'gt', 'pytorch', or 'both'"
-    )
-
-
-def pytest_generate_tests(metafunc):
-    """Generate test variants for different backends."""
-    if "backend" in metafunc.fixturenames:
-        backend_option = metafunc.config.getoption("backend")
-        if backend_option == "both":
-            backends = ["gt", "pytorch"]
-        else:
-            backends = [backend_option]
-        metafunc.parametrize("backend", backends)
 
 
 # Synthetic dataset
