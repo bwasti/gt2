@@ -119,6 +119,25 @@ class Config:
             print(f"GT: Loading config from {config_path}")
             self.load(config_path)
 
+    def register_signal(self, name: str, config: SignalConfig):
+        """
+        Register a signal configuration programmatically.
+
+        Args:
+            name: Signal name
+            config: SignalConfig instance
+
+        Example:
+            from gt.config import SignalConfig, ShardConfig
+            config = SignalConfig(
+                shard=ShardConfig(axis=0, workers=[0, 1, 2, 3]),
+                backward_signal='backward_layer1',
+                compile=True
+            )
+            gt.config.register_signal('forward_layer1', config)
+        """
+        self.signals[name] = config
+
     def clear(self):
         """Clear all configuration."""
         self.signals.clear()
@@ -142,3 +161,32 @@ def get_config() -> Config:
 def get_signal_config(name: str) -> Optional[SignalConfig]:
     """Get configuration for a named signal."""
     return _config.get_signal(name)
+
+
+def register_config(name: str, config: SignalConfig):
+    """
+    Register a signal configuration programmatically.
+
+    Args:
+        name: Signal name
+        config: SignalConfig instance with shard, backward_signal, and compile settings
+
+    Example:
+        import gt
+        from gt.config import SignalConfig, ShardConfig
+
+        # Create configuration
+        config = SignalConfig(
+            shard=ShardConfig(axis=0, workers=[0, 1, 2, 3]),
+            backward_signal='backward_layer1',
+            compile=True
+        )
+
+        # Register it
+        gt.register_config('forward_layer1', config)
+
+        # Use it
+        with gt.signal.context('forward_layer1'):
+            x = gt.randn(128, 64)
+    """
+    _config.register_signal(name, config)

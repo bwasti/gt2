@@ -321,7 +321,7 @@ class no_grad:
 from gt import signal  # Import module for signal.context() and signal.tensor()
 
 # Config loading
-from gt.config import load_config, get_config, get_signal_config
+from gt.config import load_config, get_config, get_signal_config, register_config, SignalConfig, ShardConfig
 
 # Debug utilities
 from gt import debug  # Import module for debug.get_tape(), debug.get_worker_stats()
