@@ -101,6 +101,18 @@ class RealtimeMonitor:
         self.socket.connect(monitor_url)
         return monitor_url
 
+    def _extract_op_type_from_details(self, details: str) -> Optional[str]:
+        """Extract operation type from details field (e.g., 'op=matmul')."""
+        if not details:
+            return None
+
+        # Look for op= parameter
+        match = re.search(r'op=(\w+)', details)
+        if match:
+            return match.group(1).lower()
+
+        return None
+
     def _extract_op_type(self, command: str) -> str:
         """Extract operation type from command."""
         cmd_lower = command.lower()
@@ -145,14 +157,17 @@ class RealtimeMonitor:
         event_type = event['event']
         client = event['client']
         command = event['command']
+        details = event.get('details', '')
 
         # Extract worker name
         worker_name = self._extract_worker_name(client)
         if not worker_name:
             return
 
-        # Extract operation type
-        op_type = self._extract_op_type(command)
+        # Extract operation type (check details field for op= parameter)
+        op_type = self._extract_op_type_from_details(details)
+        if not op_type:
+            op_type = self._extract_op_type(command)
 
         # Initialize worker if needed
         if worker_name not in self.workers:
