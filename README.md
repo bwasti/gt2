@@ -2,6 +2,9 @@
 
 A multiplexing tensor framework for distributed GPU computing.
 
+![gt_viz](https://github.com/user-attachments/assets/309cc78c-3572-44aa-be94-48b54996d24f)
+
+
 ```bash
 pip install git+https://github.com/bwasti/gt.git
 python -c 'import gt; print(gt.randn(2,2))'
