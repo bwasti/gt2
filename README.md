@@ -15,7 +15,7 @@ that are present in the decades of development done on multi-core operating syst
 It fully embraces dynamic scheduling and heavily asynchronous execution
 while presenting a familiar eager frontend.
 
-- **Three components**
+- **Three components** [(diagram)](#architecture)
     - N x clients (as many users as you want!)
     - 1 x dispatcher (for coordinating)
     - N x workers (1 per GPU)
