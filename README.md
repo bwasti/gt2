@@ -55,7 +55,7 @@ It may not look like it, but in the background GT automatically spins up an asyn
 
 ## Documentation
 
-📚 **[Read the full documentation](docs/)**
+📚 **[Read the full documentation](https://bwasti.github.io/gt)**
 
 ### Getting Started
 - [Installation](docs/installation.md) - Install GT and verify setup
