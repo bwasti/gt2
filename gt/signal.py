@@ -124,6 +124,10 @@ def context(name: str, backward: Optional[str] = None):
     """
     from gt.client.tensor import _client_connection, _connection_lock
     from gt.transport.protocol import CompileStart, CompileEnd
+    from gt import _ensure_connected
+
+    # Ensure connection exists before sending CompileStart
+    _ensure_connected()
 
     if _client_connection:
         with _connection_lock:
@@ -191,6 +195,10 @@ def enter(name: str, backward: Optional[str] = None):
     """
     from gt.client.tensor import _client_connection, _connection_lock
     from gt.transport.protocol import CompileStart
+    from gt import _ensure_connected
+
+    # Ensure connection exists before sending CompileStart
+    _ensure_connected()
 
     if _client_connection:
         with _connection_lock:

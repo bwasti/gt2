@@ -292,8 +292,17 @@ class Dispatcher:
                     self.register_worker(identity, cmd.worker_id)
                     response = ClientResponse(success=True)
                 else:
-                    # Process regular command
-                    response = self._process_command(cmd, client_id)
+                    # Run command through sharding modifier (may yield multiple commands)
+                    response = None
+                    for modified_cmd in self.sharding_modifier.process(cmd):
+                        response = self._process_command(modified_cmd, client_id)
+                        # If any command fails, return that failure
+                        if not response.success:
+                            break
+
+                    # If no commands were yielded, return success
+                    if response is None:
+                        response = ClientResponse(success=True)
 
                 # Serialize response
                 response_data = serialize(response)
@@ -1219,10 +1228,17 @@ Current registered workers: {len(self.workers)}
         self.next_worker_idx = (self.next_worker_idx + 1) % len(self.workers)
         return worker
 
-    def _get_worker(self, worker_id: str):
-        """Get a worker by ID."""
+    def _get_worker(self, worker_id):
+        """Get a worker by ID or index."""
+        # Handle integer indices (e.g., 0, 1, 2 from shard config)
+        if isinstance(worker_id, int):
+            if 0 <= worker_id < len(self.workers):
+                return self.workers[worker_id]
+            return None
+
+        # Handle string IDs (e.g., "auto_worker_0", "worker_foo")
         for worker in self.workers:
-            if worker["id"] == worker_id:
+            if worker["id"] == str(worker_id):
                 return worker
         return None
 
