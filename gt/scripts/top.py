@@ -63,22 +63,24 @@ class RealtimeMonitor:
     # EMA alpha (0-1, higher = more responsive, lower = smoother)
     EMA_ALPHA = 0.15
 
-    # Operation colors
+    # Operation colors (nice visible palette)
     OP_COLORS = {
-        'matmul': 'red',
-        'add': 'blue',
-        'sub': 'cyan',
-        'mul': 'magenta',
-        'div': 'yellow',
-        'relu': 'green',
-        'sigmoid': 'bright_blue',
-        'tanh': 'bright_cyan',
-        'sum': 'bright_magenta',
-        'mean': 'bright_yellow',
-        'transpose': 'bright_green',
-        'getdata': 'bright_red',
+        'matmul': 'bright_red',
+        'add': 'bright_blue',
+        'sub': 'bright_cyan',
+        'mul': 'bright_magenta',
+        'div': 'bright_yellow',
+        'relu': 'bright_green',
+        'sigmoid': 'blue',
+        'tanh': 'cyan',
+        'sum': 'magenta',
+        'mean': 'yellow',
+        'transpose': 'green',
+        'getdata': 'red',
         'allgather': 'bright_white',
-        'idle': 'white',
+        'randn': 'bright_magenta',
+        'other': 'white',
+        'idle': 'bright_black',  # Grey
     }
 
     def __init__(self, host: str, port: int, window_seconds: float = 2.0):
@@ -289,21 +291,38 @@ class RealtimeMonitor:
 
         return ''.join(bar_chars)
 
-    def _build_details(self, worker: WorkerStats) -> str:
-        """Build details string showing percentages."""
-        details = []
+    def _build_details(self, worker: WorkerStats):
+        """Build details string showing percentages with colored operation names."""
+        from rich.text import Text
+
+        result = Text()
+        items = []
 
         # Get top operations
         top_ops = sorted(worker.ema_percentages.items(), key=lambda x: -x[1])[:3]
 
         for op, pct in top_ops:
             if pct > 0.5:
-                details.append(f"{op}: {pct:.1f}%")
+                color = self.OP_COLORS.get(op, 'white')
+                item = Text()
+                item.append(op, style=f"bold {color}")
+                item.append(f": {pct:.1f}%", style="white")
+                items.append(item)
 
         if worker.ema_idle > 0.5:
-            details.append(f"idle: {worker.ema_idle:.1f}%")
+            idle_color = self.OP_COLORS['idle']
+            item = Text()
+            item.append("idle", style=f"bold {idle_color}")
+            item.append(f": {worker.ema_idle:.1f}%", style="white")
+            items.append(item)
 
-        return " | ".join(details)
+        # Join items with " | "
+        for i, item in enumerate(items):
+            if i > 0:
+                result.append(" | ", style="dim")
+            result.append(item)
+
+        return result
 
     def monitor(self):
         """Main monitoring loop."""
