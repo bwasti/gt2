@@ -10,6 +10,7 @@ import threading
 import time
 from gt.transport.connection import create_server, Connection
 from gt.debug import debug_print_dispatcher
+from gt.errors import no_workers_error
 from gt.transport.protocol import (
     ClientCommand, CreateTensor, BinaryOp, UnaryOp, ReshapeOp, SliceOp, GetData, FreeTensor, CopyTensor,
     CompileStart, CompileEnd, GetWorkerStats, RegisterWorker,
@@ -387,27 +388,7 @@ class Dispatcher:
         else:
             worker = self._pick_worker()
             if not worker:
-                error_msg = f"""
-
-======================================================================
-GT DISPATCHER ERROR: No workers available
-======================================================================
-The dispatcher has no connected workers to execute operations.
-
-Solutions:
-  1. If using auto-start: This is a bug - workers should be
-     automatically started. Please report this issue.
-
-  2. If using manual setup:
-     - Start at least one worker with:
-       python -m gt.worker --host <dispatcher_host> -p <port>
-
-  3. Check if workers disconnected (check worker logs)
-
-Current registered workers: {len(self.workers)}
-======================================================================
-"""
-                return ClientResponse(success=False, error=error_msg)
+                return ClientResponse(success=False, error=no_workers_error(len(self.workers)))
 
         # Create worker-local tensor ID
         worker_tensor_id = f"{client_id}_{cmd.tensor_id}"
