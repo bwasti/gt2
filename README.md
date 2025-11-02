@@ -7,7 +7,13 @@ pip install git+https://github.com/bwasti/gt.git
 python -c 'import gt; print(gt.randn(2,2))'
 ```
 
-## General Ideas
+## General Idea
+
+The motivation for this project is a rejection of the clunky lock-step paradigm
+ML researchers tend to use.  GT attempts to pull some of the ideas
+that are present in the decades of development done on multi-core operating systems.
+It fully embraces dynamic scheduling and heavily asynchronous execution
+while presenting a familiar eager frontend.
 
 - **Three components**
     - N x clients (as many users as you want!)
@@ -15,13 +21,27 @@ python -c 'import gt; print(gt.randn(2,2))'
     - N x workers (1 per GPU)
 - **Everything communicates with a stream of instructions**
    - Clients deal with math.  They emit (GPU-unaware) pure functional instructions
-   - The dispatcher rewrites these instructions on the fly to be GPU-aware and sends them to the workers
+   - The dispatcher **rewrites** these instructions on the fly to be GPU-aware and sends them to the workers
    - Workers asyncronously process these instructions, optionally JIT compiling
 - **Instruction streams are annotated**
    - Clients can send "signals" which allow the dispatcher to more appropriately shard the tensors
    - Dispatchers annotate "hot" paths to give hints to workers about JIT compiling
    - Annotations are supplemented with YAML configs that specify sharding and compilation information
    - Every annotation can be safely ignored, so the same code can run anywhere (just remove the YAML)
+
+
+## Quick Start
+
+```python
+import gt
+
+a = gt.randn(1000, 1000)
+b = gt.randn(1000, 1000)
+c = a @ b
+result = c[:4, :4]
+print(result)
+```
+It may not look like it, but in the background GT automatically spins up an asynchronous dispatching server and GPU worker.
 
 ## Features
 
@@ -30,24 +50,8 @@ python -c 'import gt; print(gt.randn(2,2))'
 - **PyTorch-compatible API** - Familiar syntax for tensor operations
 - **AI-assisted development** - Optimized for collaboration with AI coding assistants. See [AI Development](#optimized-for-ai-development)
 
-## Quick Start
-
-```python
-import gt
-
-# Auto-starts local server
-a = gt.randn(1000, 1000)
-b = gt.randn(1000, 1000)
-c = a @ b
-result = c.data.numpy()
-```
 
 For distributed training, see [Distributed Setup](#distributed-setup).
-
-## Stream Processing
-
-Workers process operations one at a time as they arrive from the dispatcher, which is fed a stream of instructions from the user client.
-This keeps the architecture simple and easy to reason over.
 
 
 ## Signal-Based Sharding Configuration
