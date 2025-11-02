@@ -241,13 +241,22 @@ Capture event streams for later analysis:
 # Capture 2 seconds of activity
 python -m gt.scripts.trace -s 2 --dir traces/
 
+# Capture first 100 events (with 10 second timeout)
+python -m gt.scripts.trace -s 10 -n 100 --dir traces/
+
 # Then visualize the captured trace
 python -m gt.scripts.visualize traces/trace_*.log --output timeline.png
 ```
 
+Options:
+- `-s, --seconds DURATION` - Maximum capture duration (required)
+- `-n, --max-events N` - Stop after N events (optional)
+- `--port PORT` - Dispatcher port (auto-detected by default)
+- `--dir DIR` - Output directory (default: current directory)
+
 Workflow:
 1. **Run your workload** - Normal GT script execution
-2. **Capture trace** - Record events for specified duration
+2. **Capture trace** - Record events for specified duration or event count
 3. **Visualize** - Generate timeline diagrams from captured data
 
 This complements the monitoring tools:

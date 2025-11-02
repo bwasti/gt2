@@ -9,6 +9,9 @@ Usage:
     # Capture 2 seconds of trace
     python -m gt.scripts.trace -s 2 --dir traces/
 
+    # Capture first 100 events (with 10 second timeout)
+    python -m gt.scripts.trace -s 10 -n 100 --dir traces/
+
     # Capture from specific dispatcher port
     python -m gt.scripts.trace -s 5 --port 9000 --dir traces/
 
@@ -133,8 +136,8 @@ def format_log_entry(entry: dict, start_time: float) -> str:
     return line
 
 
-def capture_trace(host: str, port: int, duration: float, output_file: str):
-    """Capture trace from dispatcher for specified duration."""
+def capture_trace(host: str, port: int, duration: float, output_file: str, max_events: int = None):
+    """Capture trace from dispatcher for specified duration or event limit."""
     monitor_port = port + 1
 
     # Connect to dispatcher monitor socket
@@ -148,7 +151,10 @@ def capture_trace(host: str, port: int, duration: float, output_file: str):
 
     print(f"GT Trace Capture")
     print(f"Connected to: {monitor_url}")
-    print(f"Duration: {duration}s")
+    if max_events:
+        print(f"Limit: {max_events} events (max {duration}s)")
+    else:
+        print(f"Duration: {duration}s")
     print(f"Output: {output_file}")
     print(f"Capturing...\n")
 
@@ -159,11 +165,12 @@ def capture_trace(host: str, port: int, duration: float, output_file: str):
     # Open output file and write header
     with open(output_file, 'w', buffering=1) as f:
         # Write header
+        limit_desc = f"{max_events} events" if max_events else f"{duration}s"
         header = f"""
 {'='*100}
 GT2 Dispatcher Instruction Stream (Trace Capture)
 Captured: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Duration: {duration}s
+Limit: {limit_desc}
 {'='*100}
 
 This log records all instructions flowing through the dispatcher:
@@ -184,8 +191,12 @@ Column Details:
 """.lstrip()
         f.write(header)
 
-        # Capture events for specified duration
+        # Capture events for specified duration or until max_events reached
         while time.time() < end_time:
+            # Check if we've hit the event limit
+            if max_events and events_captured >= max_events:
+                break
+
             try:
                 # Receive event (non-blocking with timeout)
                 msg = socket.recv()
@@ -210,6 +221,8 @@ Column Details:
     elapsed = time.time() - start_time
     print(f"Capture complete!")
     print(f"Events captured: {events_captured}")
+    if max_events and events_captured >= max_events:
+        print(f"Stopped: Event limit reached")
     print(f"Actual duration: {elapsed:.2f}s")
     print(f"Output file: {output_file}")
     print(f"\nVisualize with:")
@@ -246,6 +259,11 @@ def main():
         "-o", "--output",
         help="Output filename (default: trace_YYYYMMDD_HHMMSS.log)"
     )
+    parser.add_argument(
+        "-n", "--max-events",
+        type=int,
+        help="Maximum number of events to capture (default: unlimited)"
+    )
 
     args = parser.parse_args()
 
@@ -276,7 +294,7 @@ def main():
 
     # Capture trace
     try:
-        capture_trace(args.host, port, args.seconds, str(output_path))
+        capture_trace(args.host, port, args.seconds, str(output_path), max_events=args.max_events)
     except zmq.ZMQError as e:
         print(f"\nError connecting to dispatcher: {e}")
         print(f"\nMake sure dispatcher is running:")
