@@ -208,6 +208,53 @@ Use cases:
 
 See `gt/scripts/README.md` for complete documentation.
 
+## Real-Time Monitoring
+
+Monitor running dispatchers with htop-style worker activity visualization:
+
+```bash
+# Auto-attach to running dispatcher
+python -m gt.scripts.top
+
+# Attach to specific dispatcher
+python -m gt.scripts.top --port 9000 --host localhost
+```
+
+The monitor requires pyzmq and rich:
+```bash
+pip install pyzmq rich psutil
+# or: pip install "gt[monitor]"
+```
+
+Features:
+- **Real-time EMA-smoothed activity bars** showing operation breakdown per worker
+- **Color-coded operations** (matmul, add, relu, etc.)
+- **Idle time tracking** to identify underutilized workers
+- **Auto-detection** of running dispatchers
+- **Non-intrusive** - connects via ZMQ monitoring socket without affecting performance
+
+### Trace Capture
+
+Capture event streams for later analysis:
+
+```bash
+# Capture 2 seconds of activity
+python -m gt.scripts.trace -s 2 --dir traces/
+
+# Then visualize the captured trace
+python -m gt.scripts.visualize traces/trace_*.log --output timeline.png
+```
+
+Workflow:
+1. **Run your workload** - Normal GT script execution
+2. **Capture trace** - Record events for specified duration
+3. **Visualize** - Generate timeline diagrams from captured data
+
+This complements the monitoring tools:
+- `gt.scripts.top` - Real-time monitoring (htop-style)
+- `gt.scripts.trace` - Capture events to file
+- `gt.scripts.visualize` - Generate timeline diagrams
+
 ## Debug Utilities
 
 Inspect internal state:
