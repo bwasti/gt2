@@ -38,6 +38,7 @@ _connected = False
 _auto_server = None
 _client = None
 _num_gpu_workers = 1  # Default to 1 worker in auto-connect mode
+_auto_workers = []  # Store worker objects for proper cleanup
 
 
 def connect(address: str):
@@ -135,6 +136,9 @@ def _ensure_connected():
     t2 = time.time()
     verbose_print(f"GT: Spawning {num_workers} worker(s)... ({(t2-t1)*1000:.1f}ms)")
     worker_threads = []
+    global _auto_workers
+    _auto_workers = []  # Reset worker list
+
     for i in range(num_workers):
         def make_run_worker(worker_id, gpu_id):
             def run_worker():
@@ -156,6 +160,7 @@ def _ensure_connected():
                         backend = 'numpy'
 
                 worker = Worker(worker_id=worker_id, backend=backend)
+                _auto_workers.append(worker)  # Store for cleanup
                 worker.connect_to_dispatcher(dispatcher_host='localhost', dispatcher_port=actual_port)
             return run_worker
 
@@ -324,24 +329,37 @@ from gt import debug  # Import module for debug.get_tape(), debug.get_worker_sta
 
 # Cleanup on exit
 def _cleanup():
-    global _client, _auto_server
+    """
+    Clean shutdown of auto-started components.
+
+    This prevents segfaults by properly closing ZMQ sockets before
+    the ZMQ context is destroyed during Python shutdown.
+    """
+    global _client, _auto_server, _auto_workers
+
+    # Disconnect client first (stops sending new operations)
     if _client:
         try:
             _client.disconnect()
-        except:
+        except Exception:
             pass
+
+    # Close worker connections (prevents segfault from dangling ZMQ sockets)
+    for worker in _auto_workers:
+        try:
+            if hasattr(worker, 'conn') and worker.conn:
+                worker.conn.close()
+        except Exception:
+            pass
+
+    # Stop dispatcher (stops accepting new connections)
     if _auto_server:
         dispatcher = _auto_server
         dispatcher.running = False
         try:
             if hasattr(dispatcher, 'server_socket'):
                 dispatcher.server_socket.close()
-        except:
+        except Exception:
             pass
-
-        # Give daemon threads a brief moment to finish
-        # This prevents "Fatal Python error" from daemon threads writing to stdout during shutdown
-        import time
-        time.sleep(0.01)
 
 atexit.register(_cleanup)
