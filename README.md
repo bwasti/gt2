@@ -1,6 +1,6 @@
 # GT
 
-A multiplexing tensor framework for distributed GPU computing.
+An experimental multiplexing tensor framework for distributed GPU computing.
 
 ![gt_viz](https://github.com/user-attachments/assets/309cc78c-3572-44aa-be94-48b54996d24f)
 
