@@ -8,6 +8,8 @@ Monitor running dispatchers with htop-style worker activity visualization.
 
 ### Quick Start
 
+<img width="862" height="235" alt="Screenshot 2025-11-02 at 1 54 47 AM" src="https://github.com/user-attachments/assets/8040d59d-6869-42c8-bb2d-ee36d916935b" />
+
 ```bash
 # Auto-attach to running dispatcher
 python -m gt.scripts.top
