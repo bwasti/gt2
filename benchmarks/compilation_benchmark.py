@@ -18,65 +18,6 @@ import sys
 os.environ['GT_WORKER_BATCH_SIZE'] = '10'
 
 
-def benchmark_workload(name, workload_fn, num_iterations=100, warmup=5):
-    """
-    Run a workload many times and measure:
-    - Warmup time (includes compilation overhead)
-    - Steady-state time (amortized cost)
-    """
-    # Clear cached workload state (model, data) to avoid stale references
-    if hasattr(workload_fn, 'model'):
-        delattr(workload_fn, 'model')
-    if hasattr(workload_fn, 'data'):
-        delattr(workload_fn, 'data')
-    if hasattr(workload_fn, 'target'):
-        delattr(workload_fn, 'target')
-
-    # Only cleanup if GT is already loaded
-    # This avoids ZeroMQ socket issues from repeated cleanup/restart
-    if 'gt' in sys.modules:
-        import gt
-        try:
-            gt._cleanup()
-            # Give ZeroMQ time to clean up sockets
-            time.sleep(1.0)
-        except:
-            pass  # Ignore cleanup errors
-
-        # Force garbage collection to clean up any remaining references
-        import gc
-        gc.collect()
-        time.sleep(0.5)
-
-        # Force reimport for clean config
-        for mod in list(sys.modules.keys()):
-            if mod.startswith('gt'):
-                del sys.modules[mod]
-
-    import gt
-
-    # Warmup iterations (includes compilation)
-    warmup_start = time.time()
-    for i in range(warmup):
-        workload_fn(i)
-    warmup_time = time.time() - warmup_start
-
-    # Steady-state iterations (amortized compilation)
-    steady_start = time.time()
-    for i in range(warmup, num_iterations):
-        workload_fn(i)
-    steady_time = time.time() - steady_start
-
-    return {
-        'warmup_total': warmup_time,
-        'warmup_per_iter': warmup_time / warmup,
-        'steady_total': steady_time,
-        'steady_per_iter': steady_time / (num_iterations - warmup),
-        'total_time': warmup_time + steady_time,
-        'avg_per_iter': (warmup_time + steady_time) / num_iterations,
-    }
-
-
 # ============================================================================
 # WORKLOAD 1: Simple matmul chain (should benefit from compilation)
 # ============================================================================
@@ -218,45 +159,117 @@ def workload_mixed_ops(iteration):
 # Main benchmark runner
 # ============================================================================
 
+def run_single_benchmark(workload_name, workload_fn, num_iters, warmup, compile_mode):
+    """Run a single benchmark with given compilation mode."""
+    import gt
+
+    times = []
+    for i in range(num_iters):
+        start = time.time()
+        workload_fn(i)
+        elapsed = time.time() - start
+        times.append(elapsed)
+
+    warmup_total = sum(times[:warmup])
+    steady_total = sum(times[warmup:])
+
+    return {
+        'warmup_total': warmup_total,
+        'warmup_per_iter': warmup_total / warmup,
+        'steady_total': steady_total,
+        'steady_per_iter': steady_total / (num_iters - warmup),
+        'total_time': warmup_total + steady_total,
+        'avg_per_iter': (warmup_total + steady_total) / num_iters,
+    }
+
+
 def run_benchmarks():
     """Run all benchmarks with and without compilation."""
 
     workloads = [
         ("Simple Matmul Chain", workload_simple_matmul, 100, 5),
         ("MLP Training Step", workload_mlp_training, 100, 5),
-        # Remaining workloads disabled due to cleanup issues
-        # Re-enable after fixing ZeroMQ socket cleanup
-        # ("Attention Block", workload_attention_block, 100, 5),
-        # ("Mixed Operations", workload_mixed_ops, 100, 5),
+        ("Attention Block", workload_attention_block, 100, 5),
+        ("Mixed Operations", workload_mixed_ops, 100, 5),
     ]
 
+    # Check if we're in subprocess mode (running single benchmark)
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == '--subprocess':
+        workload_idx = int(sys.argv[2])
+        compile_mode = int(sys.argv[3])  # 0 or 1
+        num_iters = int(sys.argv[4])
+        warmup = int(sys.argv[5])
+
+        workload_name, workload_fn, _, _ = workloads[workload_idx]
+        result = run_single_benchmark(workload_name, workload_fn, num_iters, warmup, compile_mode)
+
+        # Print results as JSON for parent to parse
+        import json
+        print("BENCHMARK_RESULT:" + json.dumps(result))
+        return
+
+    # Main process - spawn subprocesses for each benchmark
     print("=" * 80)
     print("COMPILATION BENCHMARK SUITE")
     print("Testing repeated ML workloads to measure compilation amortization")
     print("=" * 80)
     print()
 
-    for workload_name, workload_fn, num_iters, warmup in workloads:
+    import subprocess
+    import json
+
+    for workload_idx, (workload_name, workload_fn, num_iters, warmup) in enumerate(workloads):
         print(f"\n{'=' * 80}")
         print(f"WORKLOAD: {workload_name}")
         print(f"Iterations: {num_iters} (warmup: {warmup})")
         print(f"{'=' * 80}")
 
-        # Test without compilation
+        # Test without compilation (subprocess)
         print("\n[1/2] WITHOUT compilation (GT_AUTO_COMPILE=0)...")
-        os.environ['GT_AUTO_COMPILE'] = '0'
-        results_no_compile = benchmark_workload(
-            workload_name, workload_fn, num_iters, warmup
+        env_no_compile = os.environ.copy()
+        env_no_compile['GT_AUTO_COMPILE'] = '0'
+        proc = subprocess.run(
+            [sys.executable, __file__, '--subprocess', str(workload_idx), '0', str(num_iters), str(warmup)],
+            env=env_no_compile,
+            capture_output=True,
+            text=True
         )
 
-        # Test with compilation
+        # Parse result
+        for line in proc.stdout.split('\n'):
+            if line.startswith('BENCHMARK_RESULT:'):
+                results_no_compile = json.loads(line[17:])
+                break
+        else:
+            print(f"ERROR: Failed to get results from subprocess")
+            print(proc.stdout)
+            print(proc.stderr)
+            continue
+
+        # Test with compilation (subprocess)
         print("[2/2] WITH compilation (GT_AUTO_COMPILE=1)...")
-        os.environ['GT_AUTO_COMPILE'] = '1'
-        os.environ['GT_HOTPATH_THRESHOLD'] = '5'  # Trigger after 5 repetitions
-        os.environ['GT_HOTPATH_MIN_SEQ'] = '3'    # Detect sequences of 3+ ops
-        results_compile = benchmark_workload(
-            workload_name, workload_fn, num_iters, warmup
+        env_compile = os.environ.copy()
+        env_compile['GT_AUTO_COMPILE'] = '1'
+        env_compile['GT_HOTPATH_THRESHOLD'] = '5'
+        env_compile['GT_HOTPATH_MIN_SEQ'] = '3'
+        proc = subprocess.run(
+            [sys.executable, __file__, '--subprocess', str(workload_idx), '1', str(num_iters), str(warmup)],
+            env=env_compile,
+            capture_output=True,
+            text=True
         )
+
+        # Parse result
+        for line in proc.stdout.split('\n'):
+            if line.startswith('BENCHMARK_RESULT:'):
+                results_compile = json.loads(line[17:])
+                break
+        else:
+            print(f"ERROR: Failed to get results from subprocess")
+            print(proc.stdout)
+            print(proc.stderr)
+            continue
 
         # Analysis
         print(f"\n{'Results':50s} {'No Compile':>12s} {'Compile':>12s} {'Speedup':>12s}")
