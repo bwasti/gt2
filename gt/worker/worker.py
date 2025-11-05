@@ -14,7 +14,7 @@ from gt.transport.connection import connect
 from gt.transport.protocol import (
     WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
     WorkerGetData, WorkerFreeTensor, WorkerHotPathStart, WorkerHotPathEnd, WorkerGetStats, WorkerResponse,
-    WorkerBatch
+    WorkerBatch, WorkerCompileStart, WorkerCompileEnd
 )
 from gt.worker.engine import create_engine, Engine, Operation
 from gt.worker.hotpath_detector import HotPathDetector
@@ -89,9 +89,9 @@ class Worker:
                 cmd = self.conn.recv()
                 response = self._process_command(cmd)
 
-                # Only send response for operations that return data
+                # Only send response for operations that return data or are sync points
                 # TCP already handles reliability, so we don't need to ack every operation
-                if isinstance(cmd, (WorkerGetData, WorkerGetStats)):
+                if isinstance(cmd, (WorkerGetData, WorkerGetStats, WorkerCompileStart, WorkerCompileEnd)):
                     self.conn.send(response)
                 # For other operations (CreateTensor, BinaryOp, etc.), don't send response
                 # The dispatcher doesn't need it - just fire and forget!
@@ -101,35 +101,45 @@ class Worker:
                 break
 
     def _process_command(self, cmd: WorkerCommand) -> WorkerResponse:
-        """Process a command from dispatcher."""
+        """Process a command from dispatcher (handles batches first)."""
         try:
-            # IMPORTANT: Disable hot path detection for now - it causes issues
-            # where buffered operations aren't flushed before their results are needed.
-            # This is a temporary fix until we have a more robust solution.
-            #
-            # The fundamental issue: when operations are buffered, they return success=True
-            # immediately, but the tensors aren't actually created until the buffer is flushed.
-            # If any operation needs those tensors before the flush, it fails with "tensor not found".
-            #
-            # TODO: Fix this properly by either:
-            # 1. Only buffering when we're sure results won't be needed immediately
-            # 2. Making buffering synchronous (flush before returning success)
-            # 3. Implementing a smarter detection system that doesn't break backward passes
+            # Handle batched commands first (unpack batch before hotpath detection)
+            if isinstance(cmd, WorkerBatch):
+                return self._handle_batch(cmd)
 
-            # Direct execution (no hot path detection)
-            return self._execute_command(cmd)
+            # Now process individual command with optional hotpath detection
+            return self._process_command_inner(cmd)
 
         except Exception as e:
             return WorkerResponse(success=False, error=str(e))
+
+    def _process_command_inner(self, cmd: WorkerCommand) -> WorkerResponse:
+        """Process a single command with optional hotpath detection."""
+        # Use hot path detection if enabled
+        if self.hotpath_detector:
+            # Hotpath detector transforms commands (injects START/END markers)
+            # Process all transformed commands
+            last_response = WorkerResponse(success=True)
+            for transformed_cmd in self.hotpath_detector.process(cmd):
+                last_response = self._execute_command(transformed_cmd)
+                # If any command fails, return that failure immediately
+                if not last_response.success:
+                    return last_response
+            return last_response
+        else:
+            # Direct execution (no hot path detection)
+            return self._execute_command(cmd)
 
     def _handle_batch(self, batch: 'WorkerBatch') -> WorkerResponse:
         """Process a batch of commands sequentially."""
         from gt.debug import debug_print_worker
         debug_print_worker(f"[BATCH] Processing {len(batch.commands)} commands")
 
-        # Execute all commands in order
+        # Process each command in the batch
+        # If hotpath detection is enabled, commands will be processed through it
         for cmd in batch.commands:
-            response = self._execute_command(cmd)
+            # Use _process_command to handle hotpath detection
+            response = self._process_command_inner(cmd)
             # If any command fails, we could choose to continue or stop
             # For now, continue processing all commands (best effort)
             if not response.success:
@@ -140,12 +150,17 @@ class Worker:
 
     def _execute_command(self, cmd: WorkerCommand) -> WorkerResponse:
         """Execute a single command (after hot path processing)."""
-        # Handle batched commands
-        if isinstance(cmd, WorkerBatch):
-            return self._handle_batch(cmd)
+        # Compilation markers (from signals)
+        if isinstance(cmd, WorkerCompileStart):
+            self.engine.handle_hotpath_start(cmd.signal_name)
+            return WorkerResponse(success=True)
 
-        # Hot path markers
-        if isinstance(cmd, WorkerHotPathStart):
+        elif isinstance(cmd, WorkerCompileEnd):
+            self.engine.handle_hotpath_end(cmd.signal_name)
+            return WorkerResponse(success=True)
+
+        # Hot path markers (from automatic detection)
+        elif isinstance(cmd, WorkerHotPathStart):
             self.engine.handle_hotpath_start(cmd.sequence_id)
             return WorkerResponse(success=True)
 

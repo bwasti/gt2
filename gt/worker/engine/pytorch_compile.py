@@ -53,7 +53,7 @@ class PyTorchCompileEngine(PyTorchEngine):
         debug_print_compile(f"Engine: Started buffering hot sequence {sequence_id}")
 
     def handle_hotpath_end(self, sequence_id: str):
-        """Compile and execute buffered operations."""
+        """Compile buffered operations and use cached version if available."""
         import os
         if os.environ.get('GT_DEBUG_WORKER') or os.environ.get('GT_DEBUG_COMPILE'):
             print(f"[ENGINE] Ending hot sequence {sequence_id}, buffer size: {len(self._buffer) if self._buffering else 'N/A'}")
@@ -66,10 +66,10 @@ class PyTorchCompileEngine(PyTorchEngine):
             debug_print_compile(f"Engine: WARNING - sequence ID mismatch")
             return
 
-        debug_print_compile(f"Engine: Compiling {len(self._buffer)} buffered operations")
+        debug_print_compile(f"Engine: Processing {len(self._buffer)} buffered operations")
 
-        # Operations are already in self._buffer as (Operation, tensors_dict)
-        # We need to extract them and compile
+        # Operations were already executed eagerly during buffering
+        # Now check if we have a cached compiled version to use
         if self._buffer:
             # Extract operations - all operations share the same tensors dict (worker's self.tensors)
             operations = []
@@ -80,16 +80,39 @@ class PyTorchCompileEngine(PyTorchEngine):
 
             import os
             if os.environ.get('GT_DEBUG_COMPILE'):
-                print(f"[FLUSH] Flushing {len(operations)} buffered operations")
-                print(f"[FLUSH] Tensors dict has {len(tensors_dict)} entries")
+                print(f"[HOTPATH_END] Processing {len(operations)} operations")
 
-            # Execute as compiled batch
-            # Results will be added directly to the worker's tensors dict
-            try:
-                self.execute_batch(operations, tensors_dict)
-            except Exception as e:
-                debug_print_compile(f"Compilation failed: {e}")
-                # Fall back handled in execute_batch
+            # Check if pattern exists in cache
+            if len(operations) >= 3:  # Only for patterns worth compiling
+                # Generate signature
+                source_code, input_tensor_ids, output_tensor_ids, id_to_var = self._generate_python_source(operations, tensors_dict)
+                base_signature = self._compute_graph_signature(operations)
+                graph_signature = f"{base_signature}:inputs={len(input_tensor_ids)}"
+
+                if graph_signature in self._compiled_cache:
+                    # Cache HIT! Use compiled version
+                    if os.environ.get('GT_DEBUG_COMPILE'):
+                        print(f"[CACHE HIT] Using cached compiled function for {len(operations)} ops")
+
+                    self._cache_hits += 1
+                    try:
+                        # Execute compiled version and update tensors
+                        self._execute_compiled_and_update(operations, tensors_dict, graph_signature, input_tensor_ids, output_tensor_ids)
+                    except Exception as e:
+                        debug_print_compile(f"Compiled execution failed: {e}")
+                        if os.environ.get('GT_DEBUG_COMPILE'):
+                            print(f"[CACHE HIT ERROR] {e}")
+                        # Eager results are already there, so we're safe
+                else:
+                    # Cache MISS - compile for next time
+                    if os.environ.get('GT_DEBUG_COMPILE'):
+                        print(f"[CACHE MISS] Compiling {len(operations)} operations for future use")
+
+                    try:
+                        self._compile_and_cache(operations, tensors_dict)
+                    except Exception as e:
+                        debug_print_compile(f"Compilation failed: {e}")
+                        # Not a big deal - we already executed eagerly
 
         # Reset buffering state
         self._buffering = False
@@ -102,12 +125,116 @@ class PyTorchCompileEngine(PyTorchEngine):
 
         This is the main entry point for operations when using compilation.
         """
+        # ALWAYS execute eagerly to create tensors immediately
+        # This prevents "tensor not found" errors in backward passes
+        self._execute_eager(operation, tensors)
+
+        # If buffering, also record for compilation
         if self._buffering:
-            # Buffer the operation
             self._buffer.append((operation, tensors))
+
+    def _execute_compiled_and_update(self, operations: List[Operation], tensors: Dict[str, Any],
+                                      graph_signature: str, input_tensor_ids: List[str],
+                                      output_tensor_ids: List[str]):
+        """
+        Execute cached compiled function and update tensors dict.
+
+        This overwrites the eagerly-computed results with compiled results.
+        Called when we have a cache hit.
+        """
+        import os
+
+        compiled_fn = self._compiled_cache[graph_signature]
+
+        # Prepare inputs
+        input_list = [tensors[tid] for tid in input_tensor_ids]
+
+        # Execute compiled function
+        result = compiled_fn(*input_list)
+
+        # Handle single vs multiple return values
+        if len(output_tensor_ids) == 1:
+            result_tensors = [result]
         else:
-            # Execute immediately (eager mode)
-            self._execute_eager(operation, tensors)
+            result_tensors = result
+
+        # Update tensors dict with compiled results (overwrite eager results)
+        if os.environ.get('GT_DEBUG_COMPILE'):
+            print(f"[COMPILED EXEC] Updating {len(output_tensor_ids)} tensors with compiled results")
+
+        for tensor_id, tensor_value in zip(output_tensor_ids, result_tensors):
+            tensors[tensor_id] = tensor_value
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                shape_str = str(tensor_value.shape) if hasattr(tensor_value, 'shape') else 'scalar'
+                print(f"  [UPDATE] {tensor_id}: {shape_str}")
+
+    def _compile_and_cache(self, operations: List[Operation], tensors: Dict[str, Any]):
+        """
+        Compile operations and cache the compiled function (without executing).
+
+        This is called after operations have already been executed eagerly.
+        We just want to compile them for future iterations.
+        """
+        # Minimum batch size for compilation to be worthwhile
+        MIN_COMPILE_BATCH_SIZE = 3
+
+        if len(operations) < MIN_COMPILE_BATCH_SIZE:
+            import os
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[SKIP COMPILE] Batch too small ({len(operations)} ops < {MIN_COMPILE_BATCH_SIZE})")
+            return
+
+        # Generate Python source code
+        source_code, input_tensor_ids, output_tensor_ids, id_to_var = self._generate_python_source(operations, tensors)
+
+        # Compute signature for caching
+        base_signature = self._compute_graph_signature(operations)
+        graph_signature = f"{base_signature}:inputs={len(input_tensor_ids)}"
+
+        import os
+
+        # Skip if already cached
+        if graph_signature in self._compiled_cache:
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[ALREADY CACHED] Skipping compilation")
+            return
+
+        if os.environ.get('GT_DEBUG_COMPILE'):
+            print(f"[TORCH.COMPILE] Compiling {len(operations)} operations...")
+            print(f"[GENERATED CODE]:\n{source_code}\n")
+
+        # Save generated code for debugging
+        if os.environ.get('GT_SAVE_COMPILED_CODE'):
+            import hashlib
+            code_hash = hashlib.md5(source_code.encode()).hexdigest()[:8]
+            filename = f"/tmp/gt_compiled_{code_hash}.py"
+            with open(filename, 'w') as f:
+                f.write(source_code)
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[SAVED CODE] {filename}")
+
+        # Create function from source using exec()
+        try:
+            namespace = {}
+            exec(source_code, namespace)
+            graph_fn = namespace['compiled_function']
+
+            # Actually run torch.compile - this can take a few seconds!
+            import time
+            compile_start = time.time()
+            compiled_fn = self.torch.compile(graph_fn, mode="default")
+            compile_time = time.time() - compile_start
+
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[TORCH.COMPILE] ✅ Compiled in {compile_time:.3f}s! Cache size now: {len(self._compiled_cache) + 1}")
+
+            self._compiled_cache[graph_signature] = compiled_fn
+            self._cache_misses += 1
+            debug_print_compile(f"Compiled new graph: {graph_signature} ({len(operations)} ops)")
+        except Exception as e:
+            debug_print_compile(f"Warning: Compilation failed ({e})")
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[COMPILE ERROR] {e}")
 
     def _execute_eager(self, operation: Operation, tensors: Dict[str, Any]):
         """Execute a single operation eagerly (not compiled)."""

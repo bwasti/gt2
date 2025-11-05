@@ -42,12 +42,13 @@ class InstructionSignature:
     def __init__(self, op_type: str, op_name: str):
         self.op_type = op_type
         self.op_name = op_name
+        self._hash = hash((self.op_type, self.op_name))  # Cache hash
 
     def __eq__(self, other):
         return self.op_type == other.op_type and self.op_name == other.op_name
 
     def __hash__(self):
-        return hash((self.op_type, self.op_name))
+        return self._hash
 
     def __repr__(self):
         return f"{self.op_type}:{self.op_name}"
@@ -59,12 +60,13 @@ class SequenceSignature:
     def __init__(self, instructions: List[InstructionSignature]):
         self.instructions = instructions
         self.length = len(instructions)
+        self._hash = hash(tuple(self.instructions))  # Cache hash
 
     def __eq__(self, other):
         return self.instructions == other.instructions
 
     def __hash__(self):
-        return hash(tuple(self.instructions))
+        return self._hash
 
     def __repr__(self):
         return f"Seq({self.length}ops)"
