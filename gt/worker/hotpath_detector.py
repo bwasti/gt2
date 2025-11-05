@@ -29,6 +29,7 @@ Output stream (with markers):
 from typing import Iterator, Optional, List
 from collections import deque
 import hashlib
+import os
 from gt.debug import debug_print_compile
 from gt.transport.protocol import (
     WorkerCommand, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
@@ -99,6 +100,11 @@ class HotPathDetector:
         self.active_hot_sequence_hash: Optional[int] = None
         self.active_hot_sequence_instructions: Optional[List[InstructionSignature]] = None
         self.active_position = 0  # Position within active sequence
+        self.active_iterations_captured = 0  # How many pattern iterations we've buffered
+
+        # Greedy expansion: capture up to N iterations of a pattern
+        # This creates larger compilation chunks (fewer function calls)
+        self.max_expansion_iterations = int(os.environ.get('GT_HOTPATH_MAX_EXPAND', '4'))  # Default: 4 iterations
 
         # Stats
         self.total_instructions = 0
@@ -172,6 +178,7 @@ class HotPathDetector:
                 self.active_hot_sequence_hash = None
                 self.active_hot_sequence_instructions = None
                 self.active_position = 0
+                self.active_iterations_captured = 0
 
             # Reset window
             self.window.clear()
@@ -204,15 +211,26 @@ class HotPathDetector:
 
                 # Check if sequence is complete
                 if self.active_position >= len(self.active_hot_sequence_instructions):
-                    # Emit END marker
-                    seq_id = hex(self.active_hot_sequence_hash)
-                    yield WorkerHotPathEnd(sequence_id=seq_id)
-                    debug_print_compile(f"Hot sequence {seq_id} complete ({len(self.active_hot_sequence_instructions)} ops)")
+                    # One iteration complete!
+                    self.active_iterations_captured += 1
 
-                    # Reset for next iteration
-                    self.active_hot_sequence_hash = None
-                    self.active_hot_sequence_instructions = None
-                    self.active_position = 0
+                    # Check if we should continue expanding (greedy expansion)
+                    if self.active_iterations_captured < self.max_expansion_iterations:
+                        # Reset position to capture another iteration
+                        self.active_position = 0
+                        debug_print_compile(f"Hot sequence iteration {self.active_iterations_captured} complete, continuing to expand...")
+                        return
+                    else:
+                        # Hit expansion limit - emit END marker
+                        seq_id = hex(self.active_hot_sequence_hash)
+                        yield WorkerHotPathEnd(sequence_id=seq_id)
+                        debug_print_compile(f"Hot sequence {seq_id} complete ({self.active_iterations_captured} iterations, {self.active_iterations_captured * len(self.active_hot_sequence_instructions)} ops)")
+
+                        # Reset for next detection
+                        self.active_hot_sequence_hash = None
+                        self.active_hot_sequence_instructions = None
+                        self.active_position = 0
+                        self.active_iterations_captured = 0
 
                 return
             else:
@@ -226,6 +244,7 @@ class HotPathDetector:
                 self.active_hot_sequence_hash = None
                 self.active_hot_sequence_instructions = None
                 self.active_position = 0
+                self.active_iterations_captured = 0
                 # Fall through to normal processing
 
         # STATE 2: Not in active sequence - record and detect patterns

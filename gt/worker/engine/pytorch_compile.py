@@ -26,6 +26,7 @@ class PyTorchCompileEngine(PyTorchEngine):
 
         # Compilation cache and stats
         self._compiled_cache: Dict[str, Callable] = {}
+        self._compiled_op_counts: Dict[str, int] = {}  # Track ops per compiled function
         self._cache_hits = 0
         self._cache_misses = 0
 
@@ -229,6 +230,7 @@ class PyTorchCompileEngine(PyTorchEngine):
                 print(f"[TORCH.COMPILE] ✅ Compiled in {compile_time:.3f}s! Cache size now: {len(self._compiled_cache) + 1}")
 
             self._compiled_cache[graph_signature] = compiled_fn
+            self._compiled_op_counts[graph_signature] = len(operations)
             self._cache_misses += 1
             debug_print_compile(f"Compiled new graph: {graph_signature} ({len(operations)} ops)")
         except Exception as e:
@@ -725,6 +727,7 @@ class PyTorchCompileEngine(PyTorchEngine):
                     print(f"[TORCH.COMPILE] ✅ Compiled in {compile_time:.3f}s! Cache size now: {len(self._compiled_cache) + 1}")
 
                 self._compiled_cache[graph_signature] = compiled_fn
+                self._compiled_op_counts[graph_signature] = len(operations)
                 self._cache_misses += 1
                 debug_print_compile(f"Compiled new graph: {graph_signature} ({len(operations)} ops)")
             except Exception as e:
@@ -771,9 +774,20 @@ class PyTorchCompileEngine(PyTorchEngine):
 
     def get_compilation_stats(self) -> Dict[str, int]:
         """Get compilation cache statistics."""
+        # Calculate average ops per compiled function
+        if self._compiled_op_counts:
+            avg_ops = sum(self._compiled_op_counts.values()) / len(self._compiled_op_counts)
+            min_ops = min(self._compiled_op_counts.values())
+            max_ops = max(self._compiled_op_counts.values())
+        else:
+            avg_ops = min_ops = max_ops = 0
+
         return {
             "cache_size": len(self._compiled_cache),
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
-            "hit_rate": self._cache_hits / max(1, self._cache_hits + self._cache_misses)
+            "hit_rate": self._cache_hits / max(1, self._cache_hits + self._cache_misses),
+            "avg_ops_per_compilation": avg_ops,
+            "min_ops_per_compilation": min_ops,
+            "max_ops_per_compilation": max_ops,
         }

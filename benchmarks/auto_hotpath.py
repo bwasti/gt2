@@ -69,6 +69,12 @@ if 'compilation' in worker_stats:
     print(f"  Cache misses:        {comp['cache_misses']}")
     print(f"  Hit rate:            {comp['hit_rate']:.1%}")
 
+    if comp['cache_size'] > 0:
+        print(f"\n  Ops per compilation:")
+        print(f"    Average:           {comp['avg_ops_per_compilation']:.1f} ops")
+        if comp['min_ops_per_compilation'] != comp['max_ops_per_compilation']:
+            print(f"    Range:             {comp['min_ops_per_compilation']}-{comp['max_ops_per_compilation']} ops")
+
     # Calculate launch reduction
     ops_per_iteration = 4  # c = a + b, d = c + b, e = d + c, f = a + e
     total_iterations = 100
