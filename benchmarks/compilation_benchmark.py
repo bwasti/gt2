@@ -15,7 +15,7 @@ import os
 import sys
 
 # Must set before importing gt
-os.environ['GT_WORKER_BATCH_SIZE'] = '10'
+os.environ['GT_HOTPATH_THRESHOLD'] = '3'
 
 
 # ============================================================================
@@ -173,6 +173,18 @@ def run_single_benchmark(workload_name, workload_fn, num_iters, warmup, compile_
     warmup_total = sum(times[:warmup])
     steady_total = sum(times[warmup:])
 
+    # Get compilation stats if compilation was enabled
+    compilation_stats = None
+    if compile_mode == 1:
+        try:
+            stats = gt.debug.get_worker_stats()
+            if stats:
+                worker_stats = list(stats.values())[0]
+                if 'compilation' in worker_stats:
+                    compilation_stats = worker_stats['compilation']
+        except Exception:
+            pass
+
     return {
         'warmup_total': warmup_total,
         'warmup_per_iter': warmup_total / warmup,
@@ -180,6 +192,7 @@ def run_single_benchmark(workload_name, workload_fn, num_iters, warmup, compile_
         'steady_per_iter': steady_total / (num_iters - warmup),
         'total_time': warmup_total + steady_total,
         'avg_per_iter': (warmup_total + steady_total) / num_iters,
+        'compilation_stats': compilation_stats,
     }
 
 
@@ -187,10 +200,10 @@ def run_benchmarks():
     """Run all benchmarks with and without compilation."""
 
     workloads = [
-        ("Simple Matmul Chain", workload_simple_matmul, 100, 5),
-        ("MLP Training Step", workload_mlp_training, 100, 5),
-        ("Attention Block", workload_attention_block, 100, 5),
-        ("Mixed Operations", workload_mixed_ops, 100, 5),
+        ("Simple Matmul Chain", workload_simple_matmul, 100, 10),
+        ("MLP Training Step", workload_mlp_training, 100, 10),
+        ("Attention Block", workload_attention_block, 100, 10),
+        ("Mixed Operations", workload_mixed_ops, 100, 10),
     ]
 
     # Check if we're in subprocess mode (running single benchmark)
@@ -322,6 +335,23 @@ def run_benchmarks():
         else:
             print(f" ❌ NO COMPILE WINS ({1/total_speedup:.2f}x faster)")
             print(f"{'':50s}    Compilation overhead not amortized")
+
+        # Show compilation stats if available
+        if results_compile.get('compilation_stats'):
+            stats = results_compile['compilation_stats']
+            print(f"\n{'Compilation Stats:':50s}")
+            print(f"{'  Cache size:':50s} {stats['cache_size']}")
+            print(f"{'  Cache hits:':50s} {stats['cache_hits']}")
+            print(f"{'  Cache misses:':50s} {stats['cache_misses']}")
+            print(f"{'  Hit rate:':50s} {stats['hit_rate']:.1%}")
+
+            if stats['cache_size'] > 0:
+                if stats['hit_rate'] > 0.5:
+                    print(f"{'':50s} ✅ Reusing compiled functions")
+                elif stats['hit_rate'] > 0:
+                    print(f"{'':50s} ⚠️  Low reuse rate")
+                else:
+                    print(f"{'':50s} ❌ Not reusing compiled functions")
 
     print("\n" + "=" * 80)
     print("BENCHMARK COMPLETE")
