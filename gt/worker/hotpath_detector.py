@@ -54,22 +54,14 @@ class InstructionSignature:
         return f"{self.op_type}:{self.op_name}"
 
 
-class SequenceSignature:
-    """Signature for a sequence of instructions."""
+def compute_sequence_hash(instructions: List[InstructionSignature]) -> int:
+    """
+    Compute integer hash for a sequence of instructions.
 
-    def __init__(self, instructions: List[InstructionSignature]):
-        self.instructions = instructions
-        self.length = len(instructions)
-        self._hash = hash(tuple(self.instructions))  # Cache hash
-
-    def __eq__(self, other):
-        return self.instructions == other.instructions
-
-    def __hash__(self):
-        return self._hash
-
-    def __repr__(self):
-        return f"Seq({self.length}ops)"
+    Uses cached hashes from InstructionSignature objects for O(n) computation.
+    Result can be used directly as dict key for O(1) equality checks.
+    """
+    return hash(tuple(inst._hash for inst in instructions))
 
 
 class HotPathDetector:
@@ -99,11 +91,13 @@ class HotPathDetector:
         # Sliding window of recent instructions
         self.window: deque = deque(maxlen=window_size)
 
-        # Track repetition counts for sequences
-        self.sequence_counts: dict = {}  # SequenceSignature -> count
+        # Track repetition counts for sequences (using integer hashes)
+        self.sequence_counts: dict = {}  # int (sequence hash) -> count
+        self.sequence_instructions: dict = {}  # int (sequence hash) -> List[InstructionSignature] (for debugging)
 
         # Active hot sequence tracking
-        self.active_hot_sequence: Optional[SequenceSignature] = None
+        self.active_hot_sequence_hash: Optional[int] = None
+        self.active_hot_sequence_instructions: Optional[List[InstructionSignature]] = None
         self.active_position = 0  # Position within active sequence
 
         # Stats
@@ -130,11 +124,11 @@ class HotPathDetector:
         # in typical training loops where you check loss every iteration.
         return False  # No operations currently trigger sync/reset
 
-    def _detect_hot_sequence(self) -> Optional[SequenceSignature]:
+    def _detect_hot_sequence(self) -> Optional[tuple]:
         """
         Detect if any sequence in the window is hot.
 
-        Returns the longest hot sequence, or None if none found.
+        Returns (hash, instructions) for the longest hot sequence, or None if none found.
         """
         if len(self.window) < self.min_sequence_length:
             return None
@@ -146,12 +140,13 @@ class HotPathDetector:
                 continue
 
             # Get the most recent sequence of this length
-            recent_seq = SequenceSignature(list(self.window)[-seq_len:])
+            recent_instructions = list(self.window)[-seq_len:]
+            seq_hash = compute_sequence_hash(recent_instructions)
 
             # Check if this sequence is hot
-            count = self.sequence_counts.get(recent_seq, 0)
+            count = self.sequence_counts.get(seq_hash, 0)
             if count >= self.hot_threshold:
-                return recent_seq
+                return (seq_hash, recent_instructions)
 
         return None
 
@@ -169,17 +164,19 @@ class HotPathDetector:
         # Sync operations reset detection
         if self._is_sync_op(cmd):
             # End any active sequence
-            if self.active_hot_sequence is not None:
+            if self.active_hot_sequence_hash is not None:
                 # IMPORTANT: Emit END marker to flush the buffer before sync
-                seq_id = hex(hash(self.active_hot_sequence))
+                seq_id = hex(self.active_hot_sequence_hash)
                 yield WorkerHotPathEnd(sequence_id=seq_id)
 
-                self.active_hot_sequence = None
+                self.active_hot_sequence_hash = None
+                self.active_hot_sequence_instructions = None
                 self.active_position = 0
 
             # Reset window
             self.window.clear()
             self.sequence_counts.clear()
+            self.sequence_instructions.clear()
 
             # Pass through sync command
             yield cmd
@@ -194,8 +191,8 @@ class HotPathDetector:
         self.total_instructions += 1
 
         # STATE 1: Are we currently inside a hot sequence?
-        if self.active_hot_sequence is not None:
-            expected = self.active_hot_sequence.instructions[self.active_position]
+        if self.active_hot_sequence_hash is not None:
+            expected = self.active_hot_sequence_instructions[self.active_position]
 
             # Check if current instruction matches expected pattern
             if self._matches_pattern(sig, expected):
@@ -206,14 +203,15 @@ class HotPathDetector:
                 yield cmd
 
                 # Check if sequence is complete
-                if self.active_position >= self.active_hot_sequence.length:
+                if self.active_position >= len(self.active_hot_sequence_instructions):
                     # Emit END marker
-                    seq_id = hex(hash(self.active_hot_sequence))
+                    seq_id = hex(self.active_hot_sequence_hash)
                     yield WorkerHotPathEnd(sequence_id=seq_id)
-                    debug_print_compile(f"Hot sequence {seq_id} complete ({self.active_hot_sequence.length} ops)")
+                    debug_print_compile(f"Hot sequence {seq_id} complete ({len(self.active_hot_sequence_instructions)} ops)")
 
                     # Reset for next iteration
-                    self.active_hot_sequence = None
+                    self.active_hot_sequence_hash = None
+                    self.active_hot_sequence_instructions = None
                     self.active_position = 0
 
                 return
@@ -222,10 +220,11 @@ class HotPathDetector:
                 debug_print_compile(f"Hot sequence interrupted (expected {expected}, got {sig})")
 
                 # IMPORTANT: Emit END marker to flush the buffer before stopping
-                seq_id = hex(hash(self.active_hot_sequence))
+                seq_id = hex(self.active_hot_sequence_hash)
                 yield WorkerHotPathEnd(sequence_id=seq_id)
 
-                self.active_hot_sequence = None
+                self.active_hot_sequence_hash = None
+                self.active_hot_sequence_instructions = None
                 self.active_position = 0
                 # Fall through to normal processing
 
@@ -235,21 +234,27 @@ class HotPathDetector:
         # Update sequence counts for all possible sequences ending here
         for seq_len in range(self.min_sequence_length, len(self.window) + 1):
             if seq_len <= len(self.window):
-                recent_seq = SequenceSignature(list(self.window)[-seq_len:])
-                self.sequence_counts[recent_seq] = self.sequence_counts.get(recent_seq, 0) + 1
+                recent_instructions = list(self.window)[-seq_len:]
+                seq_hash = compute_sequence_hash(recent_instructions)
+                self.sequence_counts[seq_hash] = self.sequence_counts.get(seq_hash, 0) + 1
+                # Store instructions for debugging (only first time)
+                if seq_hash not in self.sequence_instructions:
+                    self.sequence_instructions[seq_hash] = recent_instructions
 
         # Check if we should start a hot sequence
         hot_seq = self._detect_hot_sequence()
         if hot_seq is not None:
-            self.active_hot_sequence = hot_seq
+            seq_hash, seq_instructions = hot_seq
+            self.active_hot_sequence_hash = seq_hash
+            self.active_hot_sequence_instructions = seq_instructions
             self.active_position = 0
 
             # Check if current instruction is the START of the hot sequence
-            if self._matches_pattern(sig, hot_seq.instructions[0]):
+            if self._matches_pattern(sig, seq_instructions[0]):
                 # Emit START marker
-                seq_id = hex(hash(hot_seq))
+                seq_id = hex(seq_hash)
                 yield WorkerHotPathStart(sequence_id=seq_id)
-                debug_print_compile(f"Starting hot sequence {seq_id} ({hot_seq.length} ops, seen {self.sequence_counts[hot_seq]} times)")
+                debug_print_compile(f"Starting hot sequence {seq_id} ({len(seq_instructions)} ops, seen {self.sequence_counts[seq_hash]} times)")
 
                 self.active_position = 1
                 self.hot_instructions += 1
@@ -259,14 +264,18 @@ class HotPathDetector:
 
     def get_stats(self) -> dict:
         """Get detection statistics."""
+        # Format top sequences with readable representation
+        top_sequences = []
+        for seq_hash, count in sorted(self.sequence_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
+            instructions = self.sequence_instructions.get(seq_hash, [])
+            seq_repr = f"Seq({len(instructions)}ops: {' -> '.join(repr(inst) for inst in instructions)})"
+            top_sequences.append((seq_repr, count))
+
         return {
             'total_instructions': self.total_instructions,
             'hot_instructions': self.hot_instructions,
             'unique_sequences': len(self.sequence_counts),
             'hot_sequences': sum(1 for count in self.sequence_counts.values() if count >= self.hot_threshold),
             'hot_threshold': self.hot_threshold,
-            'top_sequences': [
-                (repr(seq), count)
-                for seq, count in sorted(self.sequence_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-            ]
+            'top_sequences': top_sequences
         }
