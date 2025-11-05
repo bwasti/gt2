@@ -346,19 +346,19 @@ def run_benchmarks():
               f"{results_compile['avg_per_iter']:>10.3f}s "
               f"{results_no_compile['avg_per_iter']/results_compile['avg_per_iter']:>11.2f}x")
 
-        # Verdict
-        speedup = results_no_compile['steady_per_iter'] / results_compile['steady_per_iter']
+        # Verdict - use steady state speedup
+        steady_speedup = results_no_compile['steady_per_iter'] / results_compile['steady_per_iter']
         total_speedup = results_no_compile['total_time'] / results_compile['total_time']
 
         print(f"\n{'VERDICT:':50s}", end='')
-        if total_speedup > 1.1:
-            print(f" ✅ COMPILE WINS ({total_speedup:.2f}x faster overall)")
-            print(f"{'':50s}    Steady-state: {speedup:.2f}x faster")
-        elif total_speedup > 0.95:
-            print(f" ≈  ROUGHLY EQUAL ({total_speedup:.2f}x)")
+        if steady_speedup > 1.1:
+            print(f" ✅ COMPILE WINS ({steady_speedup:.2f}x faster in steady state)")
+            print(f"{'':50s}    Total (amortized): {total_speedup:.2f}x faster")
+        elif steady_speedup > 0.95:
+            print(f" ≈  ROUGHLY EQUAL ({steady_speedup:.2f}x)")
         else:
-            print(f" ❌ NO COMPILE WINS ({1/total_speedup:.2f}x faster)")
-            print(f"{'':50s}    Compilation overhead not amortized")
+            print(f" ❌ NO COMPILE WINS ({1/steady_speedup:.2f}x faster without compilation)")
+            print(f"{'':50s}    Compilation overhead too high")
 
         # Show compilation stats if available
         if results_compile.get('compilation_stats'):
@@ -376,6 +376,29 @@ def run_benchmarks():
                     print(f"{'':50s} ⚠️  Low reuse rate")
                 else:
                     print(f"{'':50s} ❌ Not reusing compiled functions")
+
+            # Calculate launch reduction if we have operation count
+            if results_compile.get('total_operations'):
+                total_ops = results_compile['total_operations']
+                ops_per_iter = total_ops / num_iters
+
+                # Without compilation: every op is a separate launch
+                eager_launches = total_ops
+
+                # With compilation: eager during warmup/misses + compiled calls
+                cache_hits = stats['cache_hits']
+                cache_misses = stats['cache_misses']
+                eager_ops = int(ops_per_iter * cache_misses)
+                compiled_launches = cache_hits
+                total_launches = eager_ops + compiled_launches
+
+                reduction = eager_launches - total_launches
+                reduction_pct = (reduction / eager_launches) * 100 if eager_launches > 0 else 0
+
+                print(f"\n{'Launch Reduction:':50s}")
+                print(f"{'  Eager (no compilation):':50s} {eager_launches} launches")
+                print(f"{'  With compilation:':50s} {total_launches} launches ({eager_ops} eager + {compiled_launches} compiled)")
+                print(f"{'  Reduction:':50s} {reduction} launches ({reduction_pct:.1f}%)")
 
     print("\n" + "=" * 80)
     print("BENCHMARK COMPLETE")
