@@ -173,19 +173,21 @@ def run_single_benchmark(workload_name, workload_fn, num_iters, warmup, compile_
     warmup_total = sum(times[:warmup])
     steady_total = sum(times[warmup:])
 
-    # Get compilation stats if compilation was enabled
+    # Get stats from worker
     compilation_stats = None
-    if compile_mode == 1:
-        try:
-            stats = gt.debug.get_worker_stats()
-            if stats:
-                worker_stats = list(stats.values())[0]
-                if 'compilation' in worker_stats:
-                    compilation_stats = worker_stats['compilation']
-        except Exception:
-            pass
+    total_operations = None
+    try:
+        stats = gt.debug.get_worker_stats()
+        if stats:
+            worker_stats = list(stats.values())[0]
+            if 'compilation' in worker_stats and compile_mode == 1:
+                compilation_stats = worker_stats['compilation']
+            if 'operations' in worker_stats:
+                total_operations = worker_stats['operations']['total']
+    except Exception:
+        pass
 
-    return {
+    result = {
         'warmup_total': warmup_total,
         'warmup_per_iter': warmup_total / warmup,
         'steady_total': steady_total,
@@ -193,7 +195,15 @@ def run_single_benchmark(workload_name, workload_fn, num_iters, warmup, compile_
         'total_time': warmup_total + steady_total,
         'avg_per_iter': (warmup_total + steady_total) / num_iters,
         'compilation_stats': compilation_stats,
+        'total_operations': total_operations,
     }
+
+    # Calculate per-operation timing if we have operation count
+    if total_operations:
+        result['warmup_per_op'] = warmup_total / (total_operations * (warmup / num_iters))
+        result['steady_per_op'] = steady_total / (total_operations * ((num_iters - warmup) / num_iters))
+
+    return result
 
 
 def run_benchmarks():
@@ -299,6 +309,13 @@ def run_benchmarks():
               f"{results_compile['warmup_per_iter']:>10.3f}s "
               f"{results_no_compile['warmup_per_iter']/results_compile['warmup_per_iter']:>11.2f}x")
 
+        # Per operation (if available)
+        if 'warmup_per_op' in results_no_compile and 'warmup_per_op' in results_compile:
+            print(f"{'  Per operation:':50s} "
+                  f"{results_no_compile['warmup_per_op']*1e6:>9.2f}µs "
+                  f"{results_compile['warmup_per_op']*1e6:>9.2f}µs "
+                  f"{results_no_compile['warmup_per_op']/results_compile['warmup_per_op']:>11.2f}x")
+
         # Steady state
         print(f"{'Steady state (remaining ' + str(num_iters-warmup) + ' iters):':50s} "
               f"{results_no_compile['steady_total']:>10.3f}s "
@@ -309,6 +326,13 @@ def run_benchmarks():
               f"{results_no_compile['steady_per_iter']:>10.3f}s "
               f"{results_compile['steady_per_iter']:>10.3f}s "
               f"{results_no_compile['steady_per_iter']/results_compile['steady_per_iter']:>11.2f}x")
+
+        # Per operation (if available)
+        if 'steady_per_op' in results_no_compile and 'steady_per_op' in results_compile:
+            print(f"{'  Per operation:':50s} "
+                  f"{results_no_compile['steady_per_op']*1e6:>9.2f}µs "
+                  f"{results_compile['steady_per_op']*1e6:>9.2f}µs "
+                  f"{results_no_compile['steady_per_op']/results_compile['steady_per_op']:>11.2f}x")
 
         # Overall
         print("-" * 88)
