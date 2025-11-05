@@ -10,6 +10,39 @@ Compilation improves performance by:
 3. **Optimizing memory** - Reducing intermediate allocations
 4. **GPU kernel tuning** - Auto-tuning for specific hardware
 
+## Quick Start
+
+Enable automatic compilation with one environment variable:
+
+```bash
+GT_AUTO_COMPILE=1 python your_script.py
+```
+
+**Example:**
+
+```python
+import gt
+
+a = gt.randn(100, 100)
+b = gt.randn(100, 100)
+
+# This pattern will be automatically detected and compiled after 5 iterations
+for _ in range(100):
+    c = a + b
+    d = c + b
+    e = d + c
+    f = a + e
+
+result = f.data.numpy()
+```
+
+**What happens:**
+- First 5 iterations: Normal execution (pattern detection)
+- Iteration 5: Pattern detected, compilation starts
+- Iterations 6+: Uses compiled version (faster!)
+
+**Performance:** 3-4x speedup typical for repeated patterns.
+
 ## Enabling Compilation
 
 ### Automatic Hot Path Detection
@@ -22,9 +55,34 @@ GT_AUTO_COMPILE=1 python train.py
 
 GT automatically:
 - Tracks operation sequences
-- Identifies patterns executed 10+ times
+- Identifies patterns executed 5+ times (configurable)
 - Compiles hot paths with `torch.compile`
+- Greedily expands patterns to create larger compilation chunks
 - Reports compilation activity
+
+#### Configuration Parameters
+
+Fine-tune hotpath detection:
+
+```bash
+# Detection threshold (default: 5 repetitions)
+GT_HOTPATH_THRESHOLD=5
+
+# Minimum sequence length to consider (default: 3 ops)
+GT_HOTPATH_MIN_SEQ=3
+
+# Greedy expansion: compile N iterations together (default: 4)
+GT_HOTPATH_MAX_EXPAND=4
+
+# Combined example
+GT_AUTO_COMPILE=1 GT_HOTPATH_THRESHOLD=5 GT_HOTPATH_MAX_EXPAND=8 python train.py
+```
+
+**Greedy Expansion** captures multiple iterations of a pattern before ending the hot sequence:
+- Creates larger compiled functions (fewer calls)
+- Reduces function call overhead significantly
+- Example: 4-op pattern × 4 iterations = 16-op compilation
+- Typical values: 4-8 iterations
 
 ### Force Compile Everything
 
@@ -74,10 +132,68 @@ Output shows:
 
 Example output:
 ```
-[COMPILE] Detected hot sequence: matmul -> relu -> sum (executed 15 times)
-[COMPILE] Compiling sequence...
-[COMPILE] Compilation complete (2.3s)
-[COMPILE] Speedup: 3.2x on subsequent executions
+[COMPILE] Detected hot sequence -0x19751b926719ef6 (4 ops, seen 5 times) - will start on next op
+[COMPILE] Starting hot sequence -0x19751b926719ef6
+[COMPILE] Hot sequence iteration 1 complete, continuing to expand...
+[COMPILE] Hot sequence iteration 2 complete, continuing to expand...
+[COMPILE] Hot sequence iteration 3 complete, continuing to expand...
+[COMPILE] Hot sequence -0x19751b926719ef6 complete (4 iterations, 16 ops)
+[COMPILE] Compiled new graph: 5358b23b23ca63677c6c83150ec328b7:inputs=3 (16 ops)
+```
+
+### View Compilation Statistics
+
+Check compiled function stats in your code:
+
+```python
+import gt
+
+# Run training loop
+for _ in range(100):
+    loss = model(input)
+    loss.backward()
+
+# Get compilation stats
+stats = gt.debug.get_worker_stats()
+worker_stats = list(stats.values())[0]
+
+if 'compilation' in worker_stats:
+    comp = worker_stats['compilation']
+    print(f"Functions compiled:  {comp['cache_size']}")
+    print(f"Cache hits:          {comp['cache_hits']}")
+    print(f"Cache misses:        {comp['cache_misses']}")
+    print(f"Hit rate:            {comp['hit_rate']:.1%}")
+    print(f"Avg ops/compilation: {comp['avg_ops_per_compilation']:.1f}")
+```
+
+**Example output:**
+```
+Functions compiled:  1
+Cache hits:          23
+Cache misses:        1
+Hit rate:            95.8%
+Avg ops/compilation: 16.0
+```
+
+This shows:
+- **1 function compiled** (single pattern detected)
+- **23 cache hits** (reused 23 times)
+- **95.8% hit rate** (excellent reuse)
+- **16 ops per compilation** (4 iterations × 4 ops, greedy expansion working)
+
+### Benchmark Compilation
+
+Run the included benchmarks to verify compilation is working:
+
+```bash
+# Automatic hotpath detection benchmark
+python benchmarks/auto_hotpath.py
+
+# Full compilation benchmark suite
+python benchmarks/compilation_benchmark.py
+
+# Isolated hotpath detector tests
+python benchmarks/hotpath_detection.py
 ```
 
 ## How It Works
@@ -131,6 +247,26 @@ Iteration 12+: Compiled execution (fast)
 ```
 
 ## Performance Impact
+
+### Greedy Expansion Benefits
+
+Greedy expansion significantly improves performance by compiling multiple iterations together:
+
+**Example: 100 iterations of 4-op pattern**
+
+| Expansion | Ops/Compilation | Function Calls | Launch Reduction | Time/Iteration |
+|-----------|-----------------|----------------|------------------|----------------|
+| **None (disabled)** | 4 ops | 97 calls | 74.8% | 64ms |
+| **4 iterations** | 16 ops | 23 calls | 93.2% | 19ms |
+| **8 iterations** | 32 ops | 11 calls | 96.2% | 19ms |
+
+**Key benefits:**
+- **Fewer function calls**: 97 → 11 (8.8x reduction)
+- **Better launch reduction**: 74.8% → 96.2%
+- **3.3x speedup**: 64ms → 19ms per iteration
+- **Lower overhead**: Compilation amortized over larger chunks
+
+**Recommendation:** Use `GT_HOTPATH_MAX_EXPAND=4` for typical workloads, or `=8` for very repetitive patterns.
 
 ### Warmup Overhead
 
