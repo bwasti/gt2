@@ -8,6 +8,7 @@ Keep this SIMPLE and READABLE.
 
 import threading
 import time
+from typing import Optional
 from gt.transport.connection import create_server, Connection
 from gt.debug import debug_print_dispatcher
 from gt.errors import no_workers_error
@@ -189,6 +190,7 @@ class Dispatcher:
         self.port = port
         self.tensor_handles = TensorHandle()
         self.workers = []  # List of worker connections
+        self.worker_identities = set()  # Track ZMQ identities of workers
         self.next_worker_idx = 0  # Simple round-robin scheduling
         self.running = False
         self.server_socket = None
@@ -214,6 +216,10 @@ class Dispatcher:
 
         self.instruction_stream = InstructionStream(log_file=log_file, console=console_log, monitor_socket=self.monitor_socket)  # Record all instructions for debugging/monitoring
 
+        # Per-client signal stacks (track current signal scope for each client)
+        self.client_signal_stacks = {}  # client_id -> list of signal names (stack)
+        self.signal_stack_lock = threading.Lock()
+
         # Stream modifiers (signal-driven sharding)
         from gt.dispatcher.sharding_modifier import ShardingStreamModifier
         self.sharding_modifier = ShardingStreamModifier()
@@ -224,7 +230,40 @@ class Dispatcher:
             "id": worker_id,
             "identity": worker_identity
         })
+        self.worker_identities.add(worker_identity)  # Track for message routing
         debug_print_dispatcher(f"Worker {worker_id} registered")
+
+    def _get_current_signal(self, client_id: str) -> Optional[str]:
+        """Get the current signal scope for a client (top of stack)."""
+        with self.signal_stack_lock:
+            if client_id not in self.client_signal_stacks:
+                return None
+            stack = self.client_signal_stacks[client_id]
+            if not stack:
+                return None
+            return stack[-1]
+
+    def _push_signal(self, client_id: str, signal_name: str):
+        """Push a signal scope onto the client's stack."""
+        with self.signal_stack_lock:
+            if client_id not in self.client_signal_stacks:
+                self.client_signal_stacks[client_id] = []
+            self.client_signal_stacks[client_id].append(signal_name)
+            debug_print_dispatcher(f"Client {client_id}: pushed signal '{signal_name}', stack depth={len(self.client_signal_stacks[client_id])}")
+
+    def _pop_signal(self, client_id: str) -> Optional[str]:
+        """Pop a signal scope from the client's stack."""
+        with self.signal_stack_lock:
+            if client_id not in self.client_signal_stacks:
+                debug_print_dispatcher(f"WARNING: Client {client_id} tried to pop signal but has no stack")
+                return None
+            stack = self.client_signal_stacks[client_id]
+            if not stack:
+                debug_print_dispatcher(f"WARNING: Client {client_id} tried to pop signal but stack is empty")
+                return None
+            signal_name = stack.pop()
+            debug_print_dispatcher(f"Client {client_id}: popped signal '{signal_name}', stack depth={len(stack)}")
+            return signal_name
 
     def _send_to_worker(self, worker, cmd):
         """Send a command to a worker via ROUTER socket."""
@@ -240,18 +279,84 @@ class Dispatcher:
         # Return size for logging
         return len(data)
 
+    def _send_to_worker_async(self, worker, cmd, cmd_type_str: str):
+        """
+        Send a command to a worker asynchronously (fire-and-forget).
+
+        This sends the command without waiting for a response, allowing the
+        client to continue immediately. The worker will process commands in order.
+
+        Use this for operations that don't return data (CreateTensor, BinaryOp, etc.).
+        For operations that need data (GetData), use _send_to_worker + _recv_from_worker.
+        """
+        send_size = self._send_to_worker(worker, cmd)
+        self._log_worker_cmd(worker["id"], cmd_type_str, "", size_bytes=send_size)
+        # Don't wait for response - fire and forget!
+        debug_print_dispatcher(f"[ASYNC] Sent {cmd_type_str} to worker {worker['id']} without waiting")
+
     def _recv_from_worker(self, worker):
-        """Receive a response from a worker (blocking)."""
+        """Receive a response from a worker (blocking).
+
+        WARNING: This shares the same ROUTER socket with the main loop,
+        so we might receive client messages instead. We need to handle both.
+        """
         import zmq
+        from gt.transport.protocol import WorkerResponse
 
         # In ROUTER mode, we need to receive from the socket and match by identity
-        # This is a simplified version - in production would need proper matching
-        identity = self.server_socket.recv()
-        empty = self.server_socket.recv()
-        data = self.server_socket.recv()
+        # Keep trying until we get a response from the expected worker
+        while True:
+            identity = self.server_socket.recv()
+            empty = self.server_socket.recv()
+            data = self.server_socket.recv()
 
-        # Return both response and size
-        return deserialize(data), len(data)
+            response = deserialize(data)
+
+            # If this is a WorkerResponse (expected), return it
+            if isinstance(response, WorkerResponse):
+                return response, len(data)
+
+            # Otherwise, this is a client message that arrived while we were waiting
+            # Put it back by processing it inline
+            cmd_type = type(response).__name__
+            source_id = identity.hex()
+
+            # Determine if this is a worker or client
+            is_worker_identity = identity in self.worker_identities
+            source_type = "WORKER" if is_worker_identity else "CLIENT"
+
+            self.instruction_stream.log("RECV", f"{source_type} {source_id}", cmd_type, self._get_cmd_details(response), size_bytes=len(data))
+
+            # Process the command
+            if isinstance(response, RegisterWorker):
+                self.register_worker(identity, response.worker_id)
+                reply = ClientResponse(success=True)
+            elif is_worker_identity:
+                from gt.debug import debug_print_dispatcher
+                debug_print_dispatcher(f"WARNING: Unexpected worker message during recv: {cmd_type}")
+                continue  # Skip replying, keep waiting for WorkerResponse
+            else:
+                # Client command - process it
+                reply = None
+                for modified_cmd in self.sharding_modifier.process(response):
+                    reply = self._process_command(modified_cmd, source_id)
+                    if not isinstance(reply, ClientResponse):
+                        reply = ClientResponse(success=False, error=f"Internal error: handler returned {type(reply).__name__}")
+                        break
+                    if not reply.success:
+                        break
+                if reply is None:
+                    reply = ClientResponse(success=True)
+
+            # Send reply back
+            reply_data = serialize(reply)
+            self.server_socket.send(identity, zmq.SNDMORE)
+            self.server_socket.send(b'', zmq.SNDMORE)
+            self.server_socket.send(reply_data)
+
+            self.instruction_stream.log("SEND", f"{source_type} {source_id}", cmd_type, f"success={reply.success}", size_bytes=len(reply_data))
+
+            # Continue loop to wait for actual WorkerResponse
 
     def start(self):
         """Start the dispatcher server using ZMQ ROUTER."""
@@ -280,22 +385,34 @@ class Dispatcher:
                 # Deserialize command
                 cmd = deserialize(data)
 
-                # Use identity as client ID
-                client_id = identity.hex()
+                # Determine source type
+                is_worker = identity in self.worker_identities
+                source_type = "WORKER" if is_worker else "CLIENT"
+                source_id = identity.hex()
 
                 # Log received command with size
                 cmd_type = type(cmd).__name__
-                self.instruction_stream.log("RECV", client_id, cmd_type, self._get_cmd_details(cmd), size_bytes=recv_size)
+                self.instruction_stream.log("RECV", f"{source_type} {source_id}", cmd_type, self._get_cmd_details(cmd), size_bytes=recv_size)
 
                 # Handle worker registration
                 if isinstance(cmd, RegisterWorker):
                     self.register_worker(identity, cmd.worker_id)
                     response = ClientResponse(success=True)
+                elif is_worker:
+                    # Workers shouldn't send unsolicited messages (except RegisterWorker)
+                    # This is likely a protocol error - ignore it
+                    from gt.debug import debug_print_dispatcher
+                    debug_print_dispatcher(f"WARNING: Received unexpected message from worker: {cmd_type}")
+                    continue  # Don't process or respond
                 else:
                     # Run command through sharding modifier (may yield multiple commands)
                     response = None
                     for modified_cmd in self.sharding_modifier.process(cmd):
-                        response = self._process_command(modified_cmd, client_id)
+                        response = self._process_command(modified_cmd, source_id)
+                        # Verify we got a proper response
+                        if not isinstance(response, ClientResponse):
+                            response = ClientResponse(success=False, error=f"Internal error: handler returned {type(response).__name__} instead of ClientResponse")
+                            break
                         # If any command fails, return that failure
                         if not response.success:
                             break
@@ -314,7 +431,7 @@ class Dispatcher:
                 self.server_socket.send(response_data)
 
                 # Log sent response with size
-                self.instruction_stream.log("SEND", client_id, cmd_type, f"success={response.success}", size_bytes=send_size)
+                self.instruction_stream.log("SEND", f"{source_type} {source_id}", cmd_type, f"success={response.success}", size_bytes=send_size)
 
             except Exception as e:
                 if self.running:
@@ -394,7 +511,7 @@ class Dispatcher:
             return ClientResponse(success=False, error=str(e))
 
     def _handle_create_tensor(self, cmd: CreateTensor, client_id: str) -> ClientResponse:
-        """Handle tensor creation."""
+        """Handle tensor creation (async - immediate ack)."""
         # If sharding modifier specified a worker, use that. Otherwise use round-robin.
         if cmd.worker_id is not None:
             worker = self._get_worker(cmd.worker_id)
@@ -408,22 +525,8 @@ class Dispatcher:
         # Create worker-local tensor ID
         worker_tensor_id = f"{client_id}_{cmd.tensor_id}"
 
-        # Send command to worker
-        worker_cmd = WorkerCreateTensor(
-            tensor_id=worker_tensor_id,
-            data=cmd.data,
-            dtype=cmd.dtype,
-            shape=cmd.shape
-        )
-        send_size = self._send_to_worker(worker, worker_cmd)
-        self._log_worker_cmd(worker["id"], "WorkerCreateTensor", f"tensor={worker_tensor_id}", size_bytes=send_size)
-        worker_response, recv_size = self._recv_from_worker(worker)
-        self._log_worker_response(worker["id"], "WorkerCreateTensor", worker_response.success, size_bytes=recv_size)
-
-        if not worker_response.success:
-            return ClientResponse(success=False, error=worker_response.error)
-
-        # Register tensor location (with shard info if sharded)
+        # Register tensor location FIRST (optimistic - assume worker will succeed)
+        # If worker fails, error will be discovered later when trying to use the tensor
         from gt.dispatcher.tensor_handle import ShardInfo
         shard_info = None
         if cmd.shard_info:
@@ -443,6 +546,16 @@ class Dispatcher:
             shard_info=shard_info
         )
 
+        # Send command to worker asynchronously (don't wait for response)
+        worker_cmd = WorkerCreateTensor(
+            tensor_id=worker_tensor_id,
+            data=cmd.data,
+            dtype=cmd.dtype,
+            shape=cmd.shape
+        )
+        self._send_to_worker_async(worker, worker_cmd, "WorkerCreateTensor")
+
+        # Return immediate ack to client (don't wait for worker)
         return ClientResponse(success=True)
 
     def _handle_binary_op(self, cmd: BinaryOp, client_id: str) -> ClientResponse:
@@ -488,7 +601,7 @@ class Dispatcher:
             if not right_response.success:
                 return ClientResponse(success=False, error=f"Failed to fetch right tensor: {right_response.error}")
 
-            # Create right tensor on left worker
+            # Create right tensor on left worker (async - no response expected)
             right_copy_id = f"{client_id}_{cmd.right_id}_copy"
             create_cmd = WorkerCreateTensor(
                 tensor_id=right_copy_id,
@@ -496,11 +609,8 @@ class Dispatcher:
                 dtype=right_loc.dtype,
                 shape=right_loc.shape if right_loc.shape else right_response.data.shape
             )
-            self._send_to_worker(left_worker, create_cmd)
-            create_response, _ = self._recv_from_worker(left_worker)
-
-            if not create_response.success:
-                return ClientResponse(success=False, error=f"Failed to create right tensor copy: {create_response.error}")
+            self._send_to_worker_async(left_worker, create_cmd, "WorkerCreateTensor")
+            # No response expected - optimistic execution
 
             # Update right_loc to point to the copy on left worker
             right_loc = type('obj', (object,), {
@@ -517,32 +627,26 @@ class Dispatcher:
         # Create result tensor ID
         result_tensor_id = f"{client_id}_{cmd.result_id}"
 
-        # Send command to worker
+        # Register result location FIRST (optimistic)
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_tensor_id,
+            shape=left_loc.shape,  # Placeholder (TODO: get actual shape from op)
+            dtype=left_loc.dtype
+        )
+
+        # Send command to worker asynchronously (don't wait for response)
         worker_cmd = WorkerBinaryOp(
             result_id=result_tensor_id,
             op=cmd.op,
             left_id=left_loc.worker_tensor_id,
             right_id=right_loc.worker_tensor_id
         )
-        send_size = self._send_to_worker(worker, worker_cmd)
-        self._log_worker_cmd(worker["id"], "WorkerBinaryOp", f"op={cmd.op} result={result_tensor_id}", size_bytes=send_size)
-        worker_response, recv_size = self._recv_from_worker(worker)
-        self._log_worker_response(worker["id"], "WorkerBinaryOp", worker_response.success, size_bytes=recv_size)
+        self._send_to_worker_async(worker, worker_cmd, "WorkerBinaryOp")
 
-        if not worker_response.success:
-            return ClientResponse(success=False, error=worker_response.error)
-
-        # Register result location
-        # TODO: get actual shape/dtype from worker
-        self.tensor_handles.register(
-            client_id=client_id,
-            tensor_id=cmd.result_id,
-            worker_id=worker["id"],
-            worker_tensor_id=result_tensor_id,
-            shape=left_loc.shape,  # Placeholder
-            dtype=left_loc.dtype
-        )
-
+        # Return immediate ack to client
         return ClientResponse(success=True)
 
     def _handle_unary_op(self, cmd: UnaryOp, client_id: str) -> ClientResponse:
@@ -581,23 +685,7 @@ Current registered workers: {len(self.workers)}
 
             result_tensor_id = f"{client_id}_{cmd.result_id}"
 
-            worker_cmd = WorkerUnaryOp(
-                result_id=result_tensor_id,
-                op=cmd.op,
-                input_id=None,
-                shape=cmd.shape,
-                dtype=cmd.dtype,
-                axis=getattr(cmd, 'axis', None),
-                keepdims=getattr(cmd, 'keepdims', False)
-            )
-            send_size = self._send_to_worker(worker, worker_cmd)
-            self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} shape={cmd.shape}", size_bytes=send_size)
-            worker_response, recv_size = self._recv_from_worker(worker)
-            self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success, size_bytes=recv_size)
-
-            if not worker_response.success:
-                return ClientResponse(success=False, error=worker_response.error)
-
+            # Register tensor location FIRST (optimistic)
             from gt.dispatcher.tensor_handle import ShardInfo
             shard_info = None
             if cmd.shard_info:
@@ -617,6 +705,19 @@ Current registered workers: {len(self.workers)}
                 shard_info=shard_info
             )
 
+            # Send command to worker asynchronously
+            worker_cmd = WorkerUnaryOp(
+                result_id=result_tensor_id,
+                op=cmd.op,
+                input_id=None,
+                shape=cmd.shape,
+                dtype=cmd.dtype,
+                axis=getattr(cmd, 'axis', None),
+                keepdims=getattr(cmd, 'keepdims', False)
+            )
+            self._send_to_worker_async(worker, worker_cmd, "WorkerUnaryOp")
+
+            # Return immediate ack to client
             return ClientResponse(success=True)
 
         # For ops with inputs
@@ -640,6 +741,17 @@ Current registered workers: {len(self.workers)}
 
         result_tensor_id = f"{client_id}_{cmd.result_id}"
 
+        # Register result location FIRST (optimistic)
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_tensor_id,
+            shape=input_loc.shape,  # Placeholder (TODO: compute actual shape)
+            dtype=input_loc.dtype
+        )
+
+        # Send command to worker asynchronously
         worker_cmd = WorkerUnaryOp(
             result_id=result_tensor_id,
             op=cmd.op,
@@ -647,23 +759,9 @@ Current registered workers: {len(self.workers)}
             axis=getattr(cmd, 'axis', None),
             keepdims=getattr(cmd, 'keepdims', False)
         )
-        send_size = self._send_to_worker(worker, worker_cmd)
-        self._log_worker_cmd(worker["id"], "WorkerUnaryOp", f"op={cmd.op} input={input_loc.worker_tensor_id}", size_bytes=send_size)
-        worker_response, recv_size = self._recv_from_worker(worker)
-        self._log_worker_response(worker["id"], "WorkerUnaryOp", worker_response.success, size_bytes=recv_size)
+        self._send_to_worker_async(worker, worker_cmd, "WorkerUnaryOp")
 
-        if not worker_response.success:
-            return ClientResponse(success=False, error=worker_response.error)
-
-        self.tensor_handles.register(
-            client_id=client_id,
-            tensor_id=cmd.result_id,
-            worker_id=worker["id"],
-            worker_tensor_id=result_tensor_id,
-            shape=input_loc.shape,  # Placeholder
-            dtype=input_loc.dtype
-        )
-
+        # Return immediate ack to client
         return ClientResponse(success=True)
 
     def _handle_slice_op(self, cmd: SliceOp, client_id: str) -> ClientResponse:
@@ -685,20 +783,7 @@ Current registered workers: {len(self.workers)}
 
         result_tensor_id = f"{client_id}_{cmd.result_id}"
 
-        worker_cmd = WorkerSliceOp(
-            result_id=result_tensor_id,
-            input_id=input_loc.worker_tensor_id,
-            key=cmd.key
-        )
-        send_size = self._send_to_worker(worker, worker_cmd)
-        self._log_worker_cmd(worker["id"], "WorkerSliceOp", f"key={cmd.key}", size_bytes=send_size)
-        worker_response, recv_size = self._recv_from_worker(worker)
-        self._log_worker_response(worker["id"], "WorkerSliceOp", worker_response.success, size_bytes=recv_size)
-
-        if not worker_response.success:
-            return ClientResponse(success=False, error=worker_response.error)
-
-        # For now, register with None shape (will be computed properly later or fetched on demand)
+        # Register result location FIRST (optimistic)
         # TODO: Compute actual result shape based on slice key
         self.tensor_handles.register(
             client_id=client_id,
@@ -709,6 +794,15 @@ Current registered workers: {len(self.workers)}
             dtype=input_loc.dtype
         )
 
+        # Send command to worker asynchronously
+        worker_cmd = WorkerSliceOp(
+            result_id=result_tensor_id,
+            input_id=input_loc.worker_tensor_id,
+            key=cmd.key
+        )
+        self._send_to_worker_async(worker, worker_cmd, "WorkerSliceOp")
+
+        # Return immediate ack to client
         return ClientResponse(success=True)
 
     def _handle_reshape_op(self, cmd: ReshapeOp, client_id: str) -> ClientResponse:
@@ -729,20 +823,6 @@ Current registered workers: {len(self.workers)}
             return ClientResponse(success=False, error="Worker not found")
 
         result_tensor_id = f"{client_id}_{cmd.result_id}"
-
-        worker_cmd = WorkerReshapeOp(
-            result_id=result_tensor_id,
-            op=cmd.op,
-            input_id=input_loc.worker_tensor_id,
-            params=cmd.params
-        )
-        send_size = self._send_to_worker(worker, worker_cmd)
-        self._log_worker_cmd(worker["id"], "WorkerReshapeOp", f"op={cmd.op} params={cmd.params}", size_bytes=send_size)
-        worker_response, recv_size = self._recv_from_worker(worker)
-        self._log_worker_response(worker["id"], "WorkerReshapeOp", worker_response.success, size_bytes=recv_size)
-
-        if not worker_response.success:
-            return ClientResponse(success=False, error=worker_response.error)
 
         # Compute result shape based on operation
         import numpy as np
@@ -775,6 +855,7 @@ Current registered workers: {len(self.workers)}
             else:
                 result_shape = ()
 
+        # Register result location FIRST (optimistic)
         self.tensor_handles.register(
             client_id=client_id,
             tensor_id=cmd.result_id,
@@ -784,6 +865,16 @@ Current registered workers: {len(self.workers)}
             dtype=input_loc.dtype
         )
 
+        # Send command to worker asynchronously
+        worker_cmd = WorkerReshapeOp(
+            result_id=result_tensor_id,
+            op=cmd.op,
+            input_id=input_loc.worker_tensor_id,
+            params=cmd.params
+        )
+        self._send_to_worker_async(worker, worker_cmd, "WorkerReshapeOp")
+
+        # Return immediate ack to client
         return ClientResponse(success=True)
 
     def _handle_get_data(self, cmd: GetData, client_id: str) -> ClientResponse:
@@ -834,23 +925,24 @@ Current registered workers: {len(self.workers)}
         return ClientResponse(success=True, data=worker_response.data)
 
     def _handle_free_tensor(self, cmd: FreeTensor, client_id: str) -> ClientResponse:
-        """Handle tensor free."""
+        """Handle tensor free (async - immediate ack)."""
         loc = self.tensor_handles.get_location(client_id, cmd.tensor_id)
         if not loc:
             return ClientResponse(success=True)  # Already freed
 
+        # Free from dispatcher's registry immediately
+        self.tensor_handles.free(client_id, cmd.tensor_id)
+
+        # Send free command to worker asynchronously (don't wait)
         worker = self._get_worker(loc.worker_id)
         if worker:
             worker_cmd = WorkerFreeTensor(tensor_id=loc.worker_tensor_id)
             try:
-                send_size = self._send_to_worker(worker, worker_cmd)
-                self._log_worker_cmd(worker["id"], "WorkerFreeTensor", f"tensor={loc.worker_tensor_id}", size_bytes=send_size)
-                response, recv_size = self._recv_from_worker(worker)
-                self._log_worker_response(worker["id"], "WorkerFreeTensor", response.success if response else False, size_bytes=recv_size)
+                self._send_to_worker_async(worker, worker_cmd, "WorkerFreeTensor")
             except:
                 pass  # Worker might be dead
 
-        self.tensor_handles.free(client_id, cmd.tensor_id)
+        # Return immediate ack
         return ClientResponse(success=True)
 
     def _handle_copy_tensor(self, cmd: CopyTensor, client_id: str) -> ClientResponse:
@@ -1241,8 +1333,11 @@ Current registered workers: {len(self.workers)}
         return None
 
     def _handle_compile_start(self, cmd: CompileStart, client_id: str) -> ClientResponse:
-        """Handle compile start - check config and forward to workers if needed."""
+        """Handle compile start - push signal onto client's stack and forward to workers if needed."""
         from gt.config import get_signal_config
+
+        # Push signal onto client's stack (always track, regardless of compilation)
+        self._push_signal(client_id, cmd.signal_name)
 
         signal_config = get_signal_config(cmd.signal_name)
         should_compile = signal_config and signal_config.compile
@@ -1263,8 +1358,13 @@ Current registered workers: {len(self.workers)}
         return ClientResponse(success=True)
 
     def _handle_compile_end(self, cmd: CompileEnd, client_id: str) -> ClientResponse:
-        """Handle compile end - check config and forward to workers if needed."""
+        """Handle compile end - pop signal from client's stack and forward to workers if needed."""
         from gt.config import get_signal_config
+
+        # Pop signal from client's stack (always track, regardless of compilation)
+        popped_signal = self._pop_signal(client_id)
+        if popped_signal != cmd.signal_name:
+            debug_print_dispatcher(f"WARNING: Client {client_id} popped signal '{popped_signal}' but expected '{cmd.signal_name}' (mismatched push/pop)")
 
         signal_config = get_signal_config(cmd.signal_name)
         should_compile = signal_config and signal_config.compile
@@ -1318,6 +1418,8 @@ Current registered workers: {len(self.workers)}
             return f"tensor_id={cmd.tensor_id}"
         elif isinstance(cmd, CopyTensor):
             return f"dest={cmd.dest_id} src={cmd.src_id}"
+        elif isinstance(cmd, RegisterWorker):
+            return f"worker_id={cmd.worker_id}"
         elif isinstance(cmd, CompileStart):
             return f"signal={cmd.signal_name}"
         elif isinstance(cmd, CompileEnd):

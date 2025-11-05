@@ -148,7 +148,6 @@ class ShardingStreamModifier:
                     data=cmd.data,
                     dtype=cmd.dtype,
                     shape=cmd.shape,
-                    signal=cmd.signal,
                     worker_id=worker_id  # Specify target worker
                 )
                 yield shard_cmd
@@ -197,7 +196,6 @@ class ShardingStreamModifier:
                 data=shard_data,
                 dtype=cmd.dtype,
                 shape=tuple(shard_shape),
-                signal=cmd.signal,
                 worker_id=worker_id,  # Target specific worker
                 shard_info={
                     'axis': axis,
@@ -242,7 +240,6 @@ class ShardingStreamModifier:
                     dtype=cmd.dtype,
                     axis=getattr(cmd, 'axis', None),
                     keepdims=getattr(cmd, 'keepdims', False),
-                    signal=cmd.signal,
                     worker_id=worker_id
                 )
                 yield shard_cmd
@@ -275,7 +272,6 @@ class ShardingStreamModifier:
                 dtype=cmd.dtype,
                 axis=getattr(cmd, 'axis', None),
                 keepdims=getattr(cmd, 'keepdims', False),
-                signal=cmd.signal,
                 worker_id=worker_id,
                 shard_info={
                     'axis': axis,

@@ -122,8 +122,11 @@ class HotPathDetector:
         return None
 
     def _is_sync_op(self, cmd: WorkerCommand) -> bool:
-        """Check if command is a sync point (GetData, etc.)."""
-        return isinstance(cmd, WorkerGetData)
+        """Check if command is a sync point that should reset pattern detection."""
+        # GetData is NOT a sync point - it's just reading data and doesn't affect
+        # the computation pattern. Treating it as sync prevents hot path detection
+        # in typical training loops where you check loss every iteration.
+        return False  # No operations currently trigger sync/reset
 
     def _detect_hot_sequence(self) -> Optional[SequenceSignature]:
         """
@@ -165,7 +168,10 @@ class HotPathDetector:
         if self._is_sync_op(cmd):
             # End any active sequence
             if self.active_hot_sequence is not None:
-                # Don't emit END marker - sequence was interrupted
+                # IMPORTANT: Emit END marker to flush the buffer before sync
+                seq_id = hex(hash(self.active_hot_sequence))
+                yield WorkerHotPathEnd(sequence_id=seq_id)
+
                 self.active_hot_sequence = None
                 self.active_position = 0
 
@@ -212,6 +218,11 @@ class HotPathDetector:
             else:
                 # Pattern broken - stop tracking this sequence
                 debug_print_compile(f"Hot sequence interrupted (expected {expected}, got {sig})")
+
+                # IMPORTANT: Emit END marker to flush the buffer before stopping
+                seq_id = hex(hash(self.active_hot_sequence))
+                yield WorkerHotPathEnd(sequence_id=seq_id)
+
                 self.active_hot_sequence = None
                 self.active_position = 0
                 # Fall through to normal processing

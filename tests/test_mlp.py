@@ -27,7 +27,7 @@ def generate_data(n_samples=100):
     return X, y
 
 
-def test_mlp_training(backend):
+def test_mlp_training(backend, client):
     """Test MLP training with specified backend."""
 
     # Import appropriate backend

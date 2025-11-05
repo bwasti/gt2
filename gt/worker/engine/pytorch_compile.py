@@ -47,10 +47,17 @@ class PyTorchCompileEngine(PyTorchEngine):
         self._buffering = True
         self._current_sequence_id = sequence_id
         self._buffer = []
+        import os
+        if os.environ.get('GT_DEBUG_WORKER') or os.environ.get('GT_DEBUG_COMPILE'):
+            print(f"[ENGINE] Started buffering hot sequence {sequence_id}")
         debug_print_compile(f"Engine: Started buffering hot sequence {sequence_id}")
 
     def handle_hotpath_end(self, sequence_id: str):
         """Compile and execute buffered operations."""
+        import os
+        if os.environ.get('GT_DEBUG_WORKER') or os.environ.get('GT_DEBUG_COMPILE'):
+            print(f"[ENGINE] Ending hot sequence {sequence_id}, buffer size: {len(self._buffer) if self._buffering else 'N/A'}")
+
         if not self._buffering:
             debug_print_compile(f"Engine: WARNING - hotpath_end without start")
             return
@@ -64,16 +71,22 @@ class PyTorchCompileEngine(PyTorchEngine):
         # Operations are already in self._buffer as (Operation, tensors_dict)
         # We need to extract them and compile
         if self._buffer:
-            # Extract operations and merge tensor dicts
+            # Extract operations - all operations share the same tensors dict (worker's self.tensors)
             operations = []
-            all_tensors = {}
+            tensors_dict = None
             for op, tensors in self._buffer:
                 operations.append(op)
-                all_tensors.update(tensors)
+                tensors_dict = tensors  # All entries point to the same dict (worker's self.tensors)
+
+            import os
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[FLUSH] Flushing {len(operations)} buffered operations")
+                print(f"[FLUSH] Tensors dict has {len(tensors_dict)} entries")
 
             # Execute as compiled batch
+            # Results will be added directly to the worker's tensors dict
             try:
-                self.execute_batch(operations, all_tensors)
+                self.execute_batch(operations, tensors_dict)
             except Exception as e:
                 debug_print_compile(f"Compilation failed: {e}")
                 # Fall back handled in execute_batch
@@ -101,6 +114,11 @@ class PyTorchCompileEngine(PyTorchEngine):
         # This is essentially the same as execute_batch with 1 operation
         # but without compilation
         results = {}
+
+        import os
+        if os.environ.get('GT_DEBUG_COMPILE'):
+            print(f"[EAGER] Executing {operation.op_type}:{operation.op_name} -> {operation.result_id}")
+            print(f"[EAGER] Tensors dict id: {id(tensors)}, size: {len(tensors)}")
 
         op = operation
         if op.op_type == 'binary':
@@ -385,6 +403,131 @@ class PyTorchCompileEngine(PyTorchEngine):
 
         return graph_fn
 
+    def _generate_python_source(self, operations: List[Operation], tensors: Dict[str, Any]) -> tuple:
+        """
+        Generate readable Python source code from operations.
+
+        Returns:
+            (source_code, input_tensor_ids, output_tensor_ids, id_to_var)
+        """
+        # Identify which tensors are inputs (already exist) vs outputs (will be created)
+        all_result_ids = set(op.result_id for op in operations)
+        input_tensor_ids = []
+
+        for op in operations:
+            for input_id in op.input_ids:
+                if input_id not in all_result_ids and input_id not in input_tensor_ids:
+                    input_tensor_ids.append(input_id)
+
+        # Map tensor IDs to clean variable names
+        id_to_var = {}
+        for i, tid in enumerate(input_tensor_ids):
+            id_to_var[tid] = f"t{i}"
+
+        # Generate code lines
+        lines = []
+        lines.append("def compiled_function(" + ", ".join(f"t{i}" for i in range(len(input_tensor_ids))) + "):")
+        lines.append("    # Auto-generated from GT operations")
+        lines.append("    import torch")
+        lines.append("")
+
+        # Generate operation code
+        next_var_idx = len(input_tensor_ids)
+        for op in operations:
+            result_var = f"t{next_var_idx}"
+            id_to_var[op.result_id] = result_var
+            next_var_idx += 1
+
+            if op.op_type == 'binary':
+                left_var = id_to_var[op.input_ids[0]]
+                right_var = id_to_var[op.input_ids[1]]
+
+                if op.op_name == 'add':
+                    lines.append(f"    {result_var} = {left_var} + {right_var}")
+                elif op.op_name == 'sub':
+                    lines.append(f"    {result_var} = {left_var} - {right_var}")
+                elif op.op_name == 'mul':
+                    lines.append(f"    {result_var} = {left_var} * {right_var}")
+                elif op.op_name == 'div':
+                    lines.append(f"    {result_var} = {left_var} / {right_var}")
+                elif op.op_name == 'matmul':
+                    lines.append(f"    {result_var} = torch.matmul({left_var}, {right_var})")
+                elif op.op_name == 'gt':
+                    lines.append(f"    {result_var} = ({left_var} > {right_var}).float()")
+                else:
+                    raise ValueError(f"Unknown binary op: {op.op_name}")
+
+            elif op.op_type == 'unary':
+                input_var = id_to_var[op.input_ids[0]] if op.input_ids else None
+
+                if op.op_name == 'relu':
+                    lines.append(f"    {result_var} = torch.relu({input_var})")
+                elif op.op_name == 'sigmoid':
+                    lines.append(f"    {result_var} = torch.sigmoid({input_var})")
+                elif op.op_name == 'tanh':
+                    lines.append(f"    {result_var} = torch.tanh({input_var})")
+                elif op.op_name == 'exp':
+                    lines.append(f"    {result_var} = torch.exp({input_var})")
+                elif op.op_name == 'log':
+                    lines.append(f"    {result_var} = torch.log({input_var})")
+                elif op.op_name == 'sum':
+                    params = op.params or {}
+                    axis = params.get('axis', None)
+                    keepdims = params.get('keepdims', False)
+                    if axis is None:
+                        lines.append(f"    {result_var} = torch.sum({input_var})")
+                    else:
+                        lines.append(f"    {result_var} = torch.sum({input_var}, dim={axis}, keepdim={keepdims})")
+                elif op.op_name == 'mean':
+                    params = op.params or {}
+                    axis = params.get('axis', None)
+                    keepdims = params.get('keepdims', False)
+                    if axis is None:
+                        lines.append(f"    {result_var} = torch.mean({input_var})")
+                    else:
+                        lines.append(f"    {result_var} = torch.mean({input_var}, dim={axis}, keepdim={keepdims})")
+                elif op.op_name == 'sqrt':
+                    lines.append(f"    {result_var} = torch.sqrt({input_var})")
+                elif op.op_name == 'transpose':
+                    lines.append(f"    {result_var} = {input_var}.transpose(-2, -1)")
+                else:
+                    raise ValueError(f"Unknown unary op: {op.op_name}")
+
+            elif op.op_type == 'reshape':
+                input_var = id_to_var[op.input_ids[0]]
+                if op.op_name == 'reshape':
+                    shape_str = ", ".join(str(s) for s in op.params)
+                    lines.append(f"    {result_var} = {input_var}.reshape({shape_str})")
+                elif op.op_name == 'unsqueeze':
+                    dim = op.params[0]
+                    lines.append(f"    {result_var} = {input_var}.unsqueeze({dim})")
+                elif op.op_name == 'squeeze':
+                    if len(op.params) == 0:
+                        lines.append(f"    {result_var} = {input_var}.squeeze()")
+                    else:
+                        dim = op.params[0]
+                        lines.append(f"    {result_var} = {input_var}.squeeze({dim})")
+                else:
+                    raise ValueError(f"Unknown reshape op: {op.op_name}")
+
+            elif op.op_type == 'slice':
+                input_var = id_to_var[op.input_ids[0]]
+                # op.params contains the slice key
+                lines.append(f"    {result_var} = {input_var}[{op.params}]")
+
+        # Determine output tensors (all created tensors that still exist in tensors dict)
+        output_tensor_ids = [op.result_id for op in operations]
+
+        # Return all output tensors
+        output_vars = [id_to_var[tid] for tid in output_tensor_ids]
+        if len(output_vars) == 1:
+            lines.append(f"    return {output_vars[0]}")
+        else:
+            lines.append(f"    return ({', '.join(output_vars)},)")
+
+        source_code = "\n".join(lines)
+        return source_code, input_tensor_ids, output_tensor_ids, id_to_var
+
     def execute_batch(self, operations: List[Operation], tensors: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute a batch of operations with compilation support.
@@ -402,45 +545,100 @@ class PyTorchCompileEngine(PyTorchEngine):
 
         if len(operations) < MIN_COMPILE_BATCH_SIZE:
             # Fall back to eager execution for small batches
-            return self._execute_eager(operations, tensors)
+            import os
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[EAGER] Batch too small ({len(operations)} ops < {MIN_COMPILE_BATCH_SIZE}), using eager execution")
+            for op in operations:
+                self._execute_eager(op, tensors)
+            return tensors
 
-        # First normalize to determine number of external inputs
-        id_to_index, input_list, result_mapping = self._normalize_tensor_ids(operations, tensors)
-        num_inputs = len(input_list)
+        # Generate Python source code
+        source_code, input_tensor_ids, output_tensor_ids, id_to_var = self._generate_python_source(operations, tensors)
 
-        # Compute graph signature including input count
-        # Same operations with different input counts need different compiled functions
+        # Compute signature for caching
         base_signature = self._compute_graph_signature(operations)
-        graph_signature = f"{base_signature}:inputs={num_inputs}"
+        graph_signature = f"{base_signature}:inputs={len(input_tensor_ids)}"
+
+        import os
 
         # Check if we have a cached compiled function
         if graph_signature in self._compiled_cache:
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[CACHE HIT] Using cached compiled function for {len(operations)} ops")
             compiled_fn = self._compiled_cache[graph_signature]
             self._cache_hits += 1
         else:
-            # Build graph function with normalized indices (id_to_index already computed above)
-            graph_fn = self._build_normalized_graph_function(operations, id_to_index)
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[TORCH.COMPILE] Compiling {len(operations)} operations...")
+                print(f"[GENERATED CODE]:\n{source_code}\n")
 
-            # Compile with torch.compile
+            # Save generated code for debugging
+            if os.environ.get('GT_SAVE_COMPILED_CODE'):
+                import hashlib
+                code_hash = hashlib.md5(source_code.encode()).hexdigest()[:8]
+                filename = f"/tmp/gt_compiled_{code_hash}.py"
+                with open(filename, 'w') as f:
+                    f.write(source_code)
+                if os.environ.get('GT_DEBUG_COMPILE'):
+                    print(f"[SAVED CODE] {filename}")
+
+            # Create function from source using exec()
             try:
+                namespace = {}
+                exec(source_code, namespace)
+                graph_fn = namespace['compiled_function']
+
+                # Actually run torch.compile - this can take a few seconds!
+                import time
+                compile_start = time.time()
                 compiled_fn = self.torch.compile(graph_fn, mode="default")
+                compile_time = time.time() - compile_start
+
+                if os.environ.get('GT_DEBUG_COMPILE'):
+                    print(f"[TORCH.COMPILE] ✅ Compiled in {compile_time:.3f}s! Cache size now: {len(self._compiled_cache) + 1}")
+
                 self._compiled_cache[graph_signature] = compiled_fn
                 self._cache_misses += 1
                 debug_print_compile(f"Compiled new graph: {graph_signature} ({len(operations)} ops)")
             except Exception as e:
                 # Fall back to eager if compilation fails
                 debug_print_compile(f"Warning: Compilation failed ({e}), falling back to eager execution")
-                return self._execute_eager(operations, tensors)
+                if os.environ.get('GT_DEBUG_COMPILE'):
+                    print(f"[COMPILE ERROR] {e}")
+                for op in operations:
+                    self._execute_eager(op, tensors)
+                return tensors
 
-        # Execute compiled function with input tensors as a list
-        # (input_list and result_mapping already computed above)
-        result_list = compiled_fn(input_list)
+        # Prepare input tensors in the correct order
+        input_list = [tensors[tid] for tid in input_tensor_ids]
 
-        # Map results back to original tensor IDs
-        results_dict = {}
-        for result_id, result_idx in result_mapping.items():
-            results_dict[result_id] = result_list[result_idx]
-            tensors[result_id] = result_list[result_idx]
+        # Execute compiled function
+        try:
+            result = compiled_fn(*input_list)
+
+            # Handle single vs multiple return values
+            if len(output_tensor_ids) == 1:
+                result_tensors = [result]
+            else:
+                result_tensors = result
+
+            # Map results back to tensor IDs and add to tensors dict
+            import os
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[EXECUTE] Adding {len(output_tensor_ids)} tensors: {output_tensor_ids}")
+
+            for tensor_id, tensor_value in zip(output_tensor_ids, result_tensors):
+                tensors[tensor_id] = tensor_value
+                if os.environ.get('GT_DEBUG_COMPILE'):
+                    print(f"  -> {tensor_id}: shape={tensor_value.shape if hasattr(tensor_value, 'shape') else 'N/A'}")
+
+        except Exception as e:
+            debug_print_compile(f"Execution error: {e}")
+            if os.environ.get('GT_DEBUG_COMPILE'):
+                print(f"[EXECUTION ERROR] {e}")
+            # Fall back to eager
+            for op in operations:
+                self._execute_eager(op, tensors)
 
         return tensors
 

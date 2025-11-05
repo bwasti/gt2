@@ -107,7 +107,7 @@ def connect(host, port):
     socket = context.socket(zmq.DEALER)
 
     # Optimization: Use IPC for localhost connections
-    if host in ('localhost', '127.0.0.1'):
+    if host in ('localhost', '127.0.0.1', '0.0.0.0'):
         # IPC (Unix domain socket) - faster than TCP for local communication
         endpoint = f"ipc:///tmp/gt_dispatcher_{port}.ipc"
         socket.connect(endpoint)

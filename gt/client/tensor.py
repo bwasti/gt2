@@ -362,11 +362,7 @@ def _binary_op(op: str, left, right) -> Tensor:
 
     result = Tensor(requires_grad=requires_grad)
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
-    cmd = BinaryOp(result_id=result.id, op=op, left_id=left.id, right_id=right.id, signal=signal_name)
+    cmd = BinaryOp(result_id=result.id, op=op, left_id=left.id, right_id=right.id)
 
     with _connection_lock:
         # Process any pending frees first
@@ -511,11 +507,7 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
 
     result = Tensor(requires_grad=requires_grad)
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
-    cmd = UnaryOp(result_id=result.id, op=op, input_id=input_tensor.id, signal=signal_name)
+    cmd = UnaryOp(result_id=result.id, op=op, input_id=input_tensor.id)
 
     with _connection_lock:
         # Process any pending frees first
@@ -647,11 +639,7 @@ def _slice_op(input_tensor: Tensor, key) -> Tensor:
 
     result = Tensor()
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
-    cmd = SliceOp(result_id=result.id, input_id=input_tensor.id, key=key, signal=signal_name)
+    cmd = SliceOp(result_id=result.id, input_id=input_tensor.id, key=key)
 
     with _connection_lock:
         # Process any pending frees first
@@ -683,11 +671,7 @@ def _reshape_op(op: str, input_tensor: Tensor, params: tuple) -> Tensor:
 
     result = Tensor(requires_grad=requires_grad)
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
-    cmd = ReshapeOp(result_id=result.id, op=op, input_id=input_tensor.id, params=params, signal=signal_name)
+    cmd = ReshapeOp(result_id=result.id, op=op, input_id=input_tensor.id, params=params)
 
     with _connection_lock:
         # Process any pending frees first
@@ -773,17 +757,12 @@ def _reduce_op(op: str, input_tensor: Tensor, axis=None, keepdims=False) -> Tens
 
     result = Tensor(requires_grad=requires_grad)
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
     cmd = UnaryOp(
         result_id=result.id,
         op=op,
         input_id=input_tensor.id,
         axis=axis,
-        keepdims=keepdims,
-        signal=signal_name
+        keepdims=keepdims
     )
 
     with _connection_lock:
@@ -887,16 +866,11 @@ def from_numpy(array: np.ndarray, requires_grad: bool = False) -> Tensor:
 
     tensor = Tensor(shape=array.shape, dtype=str(array.dtype), requires_grad=requires_grad)
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
     cmd = CreateTensor(
         tensor_id=tensor.id,
         data=array,
         dtype=str(array.dtype),
-        shape=array.shape,
-        signal=signal_name
+        shape=array.shape
     )
     with _connection_lock:
         # Process any pending frees first
@@ -920,17 +894,12 @@ def randn(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
 
     tensor = Tensor(shape=shape, dtype=dtype, requires_grad=requires_grad)
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
     cmd = UnaryOp(
         result_id=tensor.id,
         op="randn",
         input_id=None,
         shape=shape,
-        dtype=dtype,
-        signal=signal_name
+        dtype=dtype
     )
     with _connection_lock:
         # Process any pending frees first
@@ -954,17 +923,12 @@ def zeros(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
 
     tensor = Tensor(shape=shape, dtype=dtype, requires_grad=requires_grad)
 
-    # Get current signal scope
-    from gt.signal import current_signal
-    signal_name = current_signal()
-
     cmd = UnaryOp(
         result_id=tensor.id,
         op="zeros",
         input_id=None,
         shape=shape,
-        dtype=dtype,
-        signal=signal_name
+        dtype=dtype
     )
     with _connection_lock:
         # Process any pending frees first

@@ -87,7 +87,14 @@ class Worker:
             try:
                 cmd = self.conn.recv()
                 response = self._process_command(cmd)
-                self.conn.send(response)
+
+                # Only send response for operations that return data
+                # TCP already handles reliability, so we don't need to ack every operation
+                if isinstance(cmd, (WorkerGetData, WorkerGetStats)):
+                    self.conn.send(response)
+                # For other operations (CreateTensor, BinaryOp, etc.), don't send response
+                # The dispatcher doesn't need it - just fire and forget!
+
             except Exception as e:
                 print(f"Worker {self.worker_id} error: {e}")
                 break
@@ -95,15 +102,21 @@ class Worker:
     def _process_command(self, cmd: WorkerCommand) -> WorkerResponse:
         """Process a command from dispatcher."""
         try:
-            # If hot path detection enabled, pass through transformer
-            if self.hotpath_detector is not None:
-                # Process command through detector (yields markers + original command)
-                for output_cmd in self.hotpath_detector.process(cmd):
-                    self._execute_command(output_cmd)
-                return WorkerResponse(success=True)
-            else:
-                # Direct execution (no hot path detection)
-                return self._execute_command(cmd)
+            # IMPORTANT: Disable hot path detection for now - it causes issues
+            # where buffered operations aren't flushed before their results are needed.
+            # This is a temporary fix until we have a more robust solution.
+            #
+            # The fundamental issue: when operations are buffered, they return success=True
+            # immediately, but the tensors aren't actually created until the buffer is flushed.
+            # If any operation needs those tensors before the flush, it fails with "tensor not found".
+            #
+            # TODO: Fix this properly by either:
+            # 1. Only buffering when we're sure results won't be needed immediately
+            # 2. Making buffering synchronous (flush before returning success)
+            # 3. Implementing a smarter detection system that doesn't break backward passes
+
+            # Direct execution (no hot path detection)
+            return self._execute_command(cmd)
 
         except Exception as e:
             return WorkerResponse(success=False, error=str(e))
@@ -160,6 +173,9 @@ class Worker:
         # If engine is buffering (hot sequence), queue the operation
         # Don't validate inputs - they might be results from earlier buffered ops
         if hasattr(self.engine, 'is_buffering') and self.engine.is_buffering():
+            import os
+            if os.environ.get('GT_DEBUG_WORKER'):
+                debug_print_worker(f"[BINARY_OP BUFFERED] {cmd.op} -> {cmd.result_id} (NOT adding to tensors yet)")
             op = Operation(
                 op_type='binary',
                 op_name=cmd.op,
@@ -361,6 +377,10 @@ class Worker:
     def _handle_get_data(self, cmd: WorkerGetData) -> WorkerResponse:
         """Get tensor data."""
         if cmd.tensor_id not in self.tensors:
+            import os
+            if os.environ.get('GT_DEBUG_WORKER'):
+                available_tensors = list(self.tensors.keys())
+                debug_print_worker(f"[GET_DATA] Tensor {cmd.tensor_id} not found! Available ({len(available_tensors)}): {available_tensors[:20]}...")
             return WorkerResponse(success=False, error="Tensor not found")
 
         tensor = self.tensors[cmd.tensor_id]

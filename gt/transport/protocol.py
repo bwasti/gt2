@@ -24,7 +24,6 @@ class CreateTensor(ClientCommand):
     data: Any  # serialized numpy array or similar
     dtype: str
     shape: tuple
-    signal: Optional[str] = None  # Signal name for sharding config
     worker_id: Optional[int] = None  # Specific worker to target (set by sharding modifier)
     shard_info: Optional[dict] = None  # Shard metadata (axis, index, num_shards)
 
@@ -36,7 +35,6 @@ class BinaryOp(ClientCommand):
     op: str  # "add", "mul", "matmul", etc.
     left_id: int
     right_id: int
-    signal: Optional[str] = None  # Signal name for sharding config
 
 
 @dataclass
@@ -47,7 +45,6 @@ class UnaryOp(ClientCommand):
     input_id: Optional[int]  # None for ops like randn that create data
     shape: Optional[tuple] = None  # for randn, etc.
     dtype: Optional[str] = None
-    signal: Optional[str] = None  # Signal name for sharding config
     # For reduction operations (sum, mean, etc.)
     axis: Optional[int] = None  # Axis to reduce over (None = all axes)
     keepdims: bool = False  # Whether to keep reduced dimensions
@@ -62,7 +59,6 @@ class ReshapeOp(ClientCommand):
     op: str  # "reshape", "unsqueeze", "squeeze"
     input_id: int
     params: tuple  # reshape: new_shape, unsqueeze: (dim,), squeeze: () or (dim,)
-    signal: Optional[str] = None  # Signal name for sharding config
 
 
 @dataclass
@@ -71,7 +67,6 @@ class SliceOp(ClientCommand):
     result_id: int
     input_id: int
     key: tuple  # Serialized slice key (can be tuple of slice objects, ints, None, Ellipsis)
-    signal: Optional[str] = None  # Signal name for sharding config
 
 
 @dataclass
@@ -95,14 +90,14 @@ class CopyTensor(ClientCommand):
 
 @dataclass
 class CompileStart(ClientCommand):
-    """Mark the start of a compilation region."""
-    signal_name: str  # Signal name for this compilation region
+    """Mark the start of a signal scope (used for sharding, compilation, etc)."""
+    signal_name: str
 
 
 @dataclass
 class CompileEnd(ClientCommand):
-    """Mark the end of a compilation region."""
-    signal_name: str  # Signal name for this compilation region
+    """Mark the end of a signal scope."""
+    signal_name: str
 
 
 @dataclass
@@ -118,28 +113,10 @@ class RegisterWorker(ClientCommand):
 
 
 @dataclass
-class BatchCommands(ClientCommand):
-    """Batch multiple operations together for efficient communication.
-
-    This reduces network overhead by sending multiple ops in one message.
-    Operations are executed in order, and all must succeed or the batch fails.
-    """
-    commands: list  # List of ClientCommand objects (BinaryOp, UnaryOp, etc.)
-
-
-@dataclass
 class ClientResponse:
     """Response from dispatcher to client."""
     success: bool
     data: Any = None  # For GetData responses
-    error: Optional[str] = None
-
-
-@dataclass
-class BatchResponses:
-    """Response for a batch of commands."""
-    success: bool
-    responses: list = None  # List of ClientResponse objects
     error: Optional[str] = None
 
 
@@ -212,21 +189,14 @@ class WorkerFreeTensor(WorkerCommand):
 
 
 @dataclass
-class WorkerMoveTensor(WorkerCommand):
-    """Move tensor to another worker."""
-    tensor_id: str
-    target_worker: str  # worker address
-
-
-@dataclass
 class WorkerCompileStart(WorkerCommand):
-    """Signal worker to start a compilation region."""
+    """Signal worker to start a signal scope."""
     signal_name: str
 
 
 @dataclass
 class WorkerCompileEnd(WorkerCommand):
-    """Signal worker to end a compilation region and compile."""
+    """Signal worker to end a signal scope."""
     signal_name: str
 
 
