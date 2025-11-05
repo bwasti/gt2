@@ -128,19 +128,18 @@ class HotPathDetector:
         """
         Detect if any sequence in the window is hot.
 
-        Returns (hash, instructions) for the SHORTEST hot sequence, or None if none found.
+        Returns (hash, instructions) for the SHORTEST hot sequence that ends at current position.
         We prefer shorter sequences because they're the fundamental repeating unit.
+        We only consider sequences ending at the current position to ensure phase alignment.
         """
         if len(self.window) < self.min_sequence_length:
             return None
 
         # Try sequences from SHORTEST to longest (prefer minimal repeating unit)
+        # IMPORTANT: Only check sequences that END at current position (most recent)
+        # This ensures we detect sequences that can actually continue from here
         for seq_len in range(self.min_sequence_length, len(self.window) + 1):
-            # Check if we have enough instructions for this length
-            if seq_len > len(self.window):
-                continue
-
-            # Get the most recent sequence of this length
+            # Get the most recent sequence of this length (ending at current position)
             recent_instructions = list(self.window)[-seq_len:]
             seq_hash = compute_sequence_hash(recent_instructions)
 
@@ -242,21 +241,32 @@ class HotPathDetector:
                 if seq_hash not in self.sequence_instructions:
                     self.sequence_instructions[seq_hash] = recent_instructions
 
-        # Check if we should start a hot sequence
-        hot_seq = self._detect_hot_sequence()
-        if hot_seq is not None:
-            seq_hash, seq_instructions = hot_seq
-            self.active_hot_sequence_hash = seq_hash
-            self.active_hot_sequence_instructions = seq_instructions
-            self.active_position = 0
+        # Check if we should start a hot sequence (only if we don't already have one)
+        if self.active_hot_sequence_hash is None:
+            hot_seq = self._detect_hot_sequence()
+            if hot_seq is not None:
+                seq_hash, seq_instructions = hot_seq
 
-            # Check if current instruction is the START of the hot sequence
-            if self._matches_pattern(sig, seq_instructions[0]):
+                # We just detected a hot sequence ending at current position
+                # Check if current instruction is the LAST element (we just completed one iteration)
+                # If so, the NEXT instruction will start a new iteration
+                if self._matches_pattern(sig, seq_instructions[-1]):
+                    # We just completed a sequence iteration
+                    # Next instruction will be the start of a new iteration
+                    self.active_hot_sequence_hash = seq_hash
+                    self.active_hot_sequence_instructions = seq_instructions
+                    self.active_position = 0  # Will emit START on next instruction
+
+                    debug_print_compile(f"Detected hot sequence {hex(seq_hash)} ({len(seq_instructions)} ops, seen {self.sequence_counts[seq_hash]} times) - will start on next op")
+
+        # If we're ready to start (position == 0) and have an active sequence
+        if self.active_hot_sequence_hash is not None and self.active_position == 0:
+            # Check if current instruction matches the start of the sequence
+            if self._matches_pattern(sig, self.active_hot_sequence_instructions[0]):
                 # Emit START marker
-                seq_id = hex(seq_hash)
+                seq_id = hex(self.active_hot_sequence_hash)
                 yield WorkerHotPathStart(sequence_id=seq_id)
-                debug_print_compile(f"Starting hot sequence {seq_id} ({len(seq_instructions)} ops, seen {self.sequence_counts[seq_hash]} times)")
-
+                debug_print_compile(f"Starting hot sequence {seq_id}")
                 self.active_position = 1
                 self.hot_instructions += 1
 
