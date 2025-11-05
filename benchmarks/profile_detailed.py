@@ -40,4 +40,15 @@ def profile_operations():
     print(s.getvalue())
 
 if __name__ == "__main__":
-    profile_operations()
+    import gt
+
+    # Auto-start the GT system
+    gt.zeros(1, 1)  # Force initialization
+
+    try:
+        profile_operations()
+    finally:
+        # Clean shutdown
+        import time
+        time.sleep(0.1)  # Let pending operations finish
+        print("\nProfile complete!")

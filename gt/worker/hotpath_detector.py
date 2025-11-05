@@ -128,13 +128,14 @@ class HotPathDetector:
         """
         Detect if any sequence in the window is hot.
 
-        Returns (hash, instructions) for the longest hot sequence, or None if none found.
+        Returns (hash, instructions) for the SHORTEST hot sequence, or None if none found.
+        We prefer shorter sequences because they're the fundamental repeating unit.
         """
         if len(self.window) < self.min_sequence_length:
             return None
 
-        # Try sequences from longest to shortest
-        for seq_len in range(len(self.window), self.min_sequence_length - 1, -1):
+        # Try sequences from SHORTEST to longest (prefer minimal repeating unit)
+        for seq_len in range(self.min_sequence_length, len(self.window) + 1):
             # Check if we have enough instructions for this length
             if seq_len > len(self.window):
                 continue
