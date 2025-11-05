@@ -220,6 +220,11 @@ class Dispatcher:
         self.client_signal_stacks = {}  # client_id -> list of signal names (stack)
         self.signal_stack_lock = threading.Lock()
 
+        # Per-worker command buffers for batching
+        self.worker_buffers = {}  # worker_id -> list of pending commands
+        self.buffer_lock = threading.Lock()
+        self.max_batch_size = 50  # Flush buffer when it reaches this size
+
         # Stream modifiers (signal-driven sharding)
         from gt.dispatcher.sharding_modifier import ShardingStreamModifier
         self.sharding_modifier = ShardingStreamModifier()
@@ -281,18 +286,68 @@ class Dispatcher:
 
     def _send_to_worker_async(self, worker, cmd, cmd_type_str: str):
         """
-        Send a command to a worker asynchronously (fire-and-forget).
+        Buffer a command to be sent to worker in a batch.
 
-        This sends the command without waiting for a response, allowing the
-        client to continue immediately. The worker will process commands in order.
+        Instead of sending immediately, commands are buffered and sent together
+        in batches, reducing network overhead. Buffer is flushed when:
+        - Reaching max_batch_size
+        - Before GetData (need to ensure previous ops are done)
+        - End of client command processing
 
         Use this for operations that don't return data (CreateTensor, BinaryOp, etc.).
         For operations that need data (GetData), use _send_to_worker + _recv_from_worker.
         """
-        send_size = self._send_to_worker(worker, cmd)
-        self._log_worker_cmd(worker["id"], cmd_type_str, "", size_bytes=send_size)
-        # Don't wait for response - fire and forget!
-        debug_print_dispatcher(f"[ASYNC] Sent {cmd_type_str} to worker {worker['id']} without waiting")
+        worker_id = worker["id"]
+
+        # Initialize buffer for this worker if needed
+        with self.buffer_lock:
+            if worker_id not in self.worker_buffers:
+                self.worker_buffers[worker_id] = []
+
+            # Add command to buffer
+            self.worker_buffers[worker_id].append((cmd, cmd_type_str))
+            buffer_size = len(self.worker_buffers[worker_id])
+
+        debug_print_dispatcher(f"[BATCH] Buffered {cmd_type_str} for worker {worker_id} (buffer size: {buffer_size})")
+
+        # Flush if buffer is full
+        if buffer_size >= self.max_batch_size:
+            self._flush_worker_buffer(worker)
+
+    def _flush_worker_buffer(self, worker):
+        """
+        Send all buffered commands to a worker in a single batch.
+
+        This reduces network overhead by sending multiple operations together.
+        """
+        from gt.transport.protocol import WorkerBatch
+
+        worker_id = worker["id"]
+
+        with self.buffer_lock:
+            if worker_id not in self.worker_buffers or not self.worker_buffers[worker_id]:
+                return  # Nothing to flush
+
+            # Get all buffered commands
+            buffered = self.worker_buffers[worker_id]
+            self.worker_buffers[worker_id] = []  # Clear buffer
+
+        # Always send as batch (even if only 1 command)
+        commands = [cmd for cmd, _ in buffered]
+        batch = WorkerBatch(commands=commands)
+        send_size = self._send_to_worker(worker, batch)
+
+        # Log the batch
+        cmd_types = ", ".join(cmd_type for _, cmd_type in buffered[:5])  # Show first 5
+        if len(buffered) > 5:
+            cmd_types += f", ... (+{len(buffered)-5} more)"
+        self._log_worker_cmd(worker_id, "WorkerBatch", f"[{len(commands)} cmds: {cmd_types}]", size_bytes=send_size)
+        debug_print_dispatcher(f"[BATCH] Flushed {len(commands)} commands to worker {worker_id}")
+
+    def _flush_all_worker_buffers(self):
+        """Flush buffers for all workers."""
+        for worker in self.workers:
+            self._flush_worker_buffer(worker)
 
     def _recv_from_worker(self, worker):
         """Receive a response from a worker (blocking).
@@ -420,6 +475,10 @@ class Dispatcher:
                     # If no commands were yielded, return success
                     if response is None:
                         response = ClientResponse(success=True)
+
+                # Flush all worker buffers before sending response to client
+                # This ensures all buffered operations are sent to workers
+                self._flush_all_worker_buffers()
 
                 # Serialize response
                 response_data = serialize(response)
@@ -879,6 +938,9 @@ Current registered workers: {len(self.workers)}
 
     def _handle_get_data(self, cmd: GetData, client_id: str) -> ClientResponse:
         """Handle data request."""
+        # Flush all buffers before fetching data to ensure operations are complete
+        self._flush_all_worker_buffers()
+
         locs = self.tensor_handles.get_locations(client_id, cmd.tensor_id)
         if not locs:
             return ClientResponse(success=False, error="Tensor not found")
@@ -1386,6 +1448,9 @@ Current registered workers: {len(self.workers)}
 
     def _handle_get_worker_stats(self, cmd: GetWorkerStats, client_id: str) -> ClientResponse:
         """Handle worker stats request - query all workers and aggregate."""
+        # Flush all buffers before getting stats
+        self._flush_all_worker_buffers()
+
         all_stats = {}
 
         for worker in self.workers:

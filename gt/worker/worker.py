@@ -13,7 +13,8 @@ from typing import Dict, Any
 from gt.transport.connection import connect
 from gt.transport.protocol import (
     WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
-    WorkerGetData, WorkerFreeTensor, WorkerHotPathStart, WorkerHotPathEnd, WorkerGetStats, WorkerResponse
+    WorkerGetData, WorkerFreeTensor, WorkerHotPathStart, WorkerHotPathEnd, WorkerGetStats, WorkerResponse,
+    WorkerBatch
 )
 from gt.worker.engine import create_engine, Engine, Operation
 from gt.worker.hotpath_detector import HotPathDetector
@@ -121,8 +122,28 @@ class Worker:
         except Exception as e:
             return WorkerResponse(success=False, error=str(e))
 
+    def _handle_batch(self, batch: 'WorkerBatch') -> WorkerResponse:
+        """Process a batch of commands sequentially."""
+        from gt.debug import debug_print_worker
+        debug_print_worker(f"[BATCH] Processing {len(batch.commands)} commands")
+
+        # Execute all commands in order
+        for cmd in batch.commands:
+            response = self._execute_command(cmd)
+            # If any command fails, we could choose to continue or stop
+            # For now, continue processing all commands (best effort)
+            if not response.success:
+                debug_print_worker(f"[BATCH] Command {type(cmd).__name__} failed: {response.error}")
+
+        # Batch commands don't need a response (they're all fire-and-forget)
+        return WorkerResponse(success=True)
+
     def _execute_command(self, cmd: WorkerCommand) -> WorkerResponse:
         """Execute a single command (after hot path processing)."""
+        # Handle batched commands
+        if isinstance(cmd, WorkerBatch):
+            return self._handle_batch(cmd)
+
         # Hot path markers
         if isinstance(cmd, WorkerHotPathStart):
             self.engine.handle_hotpath_start(cmd.sequence_id)

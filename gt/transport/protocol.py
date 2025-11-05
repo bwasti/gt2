@@ -219,6 +219,16 @@ class WorkerGetStats(WorkerCommand):
 
 
 @dataclass
+class WorkerBatch(WorkerCommand):
+    """Batch of commands to execute on worker.
+
+    This allows sending multiple operations in a single message,
+    reducing network overhead. Worker processes commands sequentially.
+    """
+    commands: list  # List of WorkerCommand objects
+
+
+@dataclass
 class WorkerResponse:
     """Response from worker to dispatcher."""
     success: bool
