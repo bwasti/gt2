@@ -375,16 +375,17 @@ class no_grad:
     """
 
     def __init__(self):
-        self.prev_requires_grad = []
+        self.prev_grad_enabled = None
 
     def __enter__(self):
-        # For now, this is a no-op since we don't have a global grad mode
-        # In PyTorch, this would set torch.is_grad_enabled() = False
+        from gt.client.tensor import is_grad_enabled, set_grad_enabled
+        self.prev_grad_enabled = is_grad_enabled()
+        set_grad_enabled(False)
         return self
 
     def __exit__(self, *args):
-        # Restore gradient tracking
-        pass
+        from gt.client.tensor import set_grad_enabled
+        set_grad_enabled(self.prev_grad_enabled)
 
 
 # Signal API for configuration-based sharding

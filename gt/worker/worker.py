@@ -376,6 +376,20 @@ class Worker:
                     result = input_tensor.squeeze(dim)
                 else:
                     result = np.squeeze(input_tensor, axis=dim)
+        elif cmd.op == "transpose_dims":
+            # Transpose (swap) two specific dimensions
+            dim0, dim1 = cmd.params
+            if self.backend_name == "pytorch":
+                result = input_tensor.transpose(dim0, dim1)
+            else:
+                result = np.swapaxes(input_tensor, dim0, dim1)
+        elif cmd.op == "permute":
+            # Permute (rearrange) dimensions
+            dims = cmd.params
+            if self.backend_name == "pytorch":
+                result = input_tensor.permute(*dims)
+            else:
+                result = np.transpose(input_tensor, dims)
         else:
             return WorkerResponse(success=False, error=f"Unknown reshape op: {cmd.op}")
 

@@ -18,6 +18,19 @@ _next_tensor_id = 0
 _connection_lock = threading.Lock()  # Ensure serial command/response flow
 _free_queue = deque()  # Queue of tensor IDs to free (appended from GC, processed in lock)
 
+# Thread-local gradient tracking
+_thread_local = threading.local()
+
+
+def is_grad_enabled():
+    """Check if gradient tracking is enabled."""
+    return getattr(_thread_local, 'grad_enabled', True)
+
+
+def set_grad_enabled(enabled: bool):
+    """Set gradient tracking state."""
+    _thread_local.grad_enabled = enabled
+
 
 class TensorData:
     """Wrapper for tensor data that provides a .numpy() method."""
@@ -290,9 +303,46 @@ class Tensor:
             return _reshape_op("squeeze", self, ())
         return _reshape_op("squeeze", self, (dim,))
 
-    def transpose(self):
-        """Transpose tensor (swap last two dimensions)"""
-        return _unary_op("transpose", self)
+    def transpose(self, dim0=None, dim1=None):
+        """
+        Transpose tensor.
+
+        If dim0 and dim1 are None, swaps last two dimensions (like .T).
+        If dim0 and dim1 are specified, swaps those two dimensions.
+
+        Args:
+            dim0: First dimension to swap (default: None, swaps last 2)
+            dim1: Second dimension to swap (default: None, swaps last 2)
+
+        Returns:
+            Transposed tensor
+        """
+        if dim0 is None and dim1 is None:
+            # Legacy behavior: swap last two dimensions
+            return _unary_op("transpose", self)
+        elif dim0 is not None and dim1 is not None:
+            # New behavior: swap specific dimensions
+            return _transpose_op(self, dim0, dim1)
+        else:
+            raise ValueError("transpose() requires both dim0 and dim1, or neither")
+
+    def permute(self, *dims):
+        """
+        Permute dimensions of tensor.
+
+        Args:
+            *dims: New ordering of dimensions
+
+        Example:
+            x = gt.randn(2, 3, 4, 5)
+            y = x.permute(0, 2, 1, 3)  # Shape: (2, 4, 3, 5)
+
+        Returns:
+            Tensor with permuted dimensions
+        """
+        if len(dims) == 1 and isinstance(dims[0], (list, tuple)):
+            dims = dims[0]
+        return _permute_op(self, dims)
 
     @property
     def T(self):
@@ -375,7 +425,7 @@ def _binary_op(op: str, left, right) -> Tensor:
         right = from_numpy(np.array(right, dtype='float32'))
 
     # Check if we need gradients
-    requires_grad = left.requires_grad or right.requires_grad
+    requires_grad = is_grad_enabled() and (left.requires_grad or right.requires_grad)
 
     result = Tensor(requires_grad=requires_grad)
 
@@ -520,7 +570,7 @@ def _unary_op(op: str, input_tensor: Tensor) -> Tensor:
     if _client_connection is None:
         raise RuntimeError(not_connected_error())
 
-    requires_grad = input_tensor.requires_grad
+    requires_grad = is_grad_enabled() and input_tensor.requires_grad
 
     result = Tensor(requires_grad=requires_grad)
 
@@ -684,7 +734,7 @@ def _reshape_op(op: str, input_tensor: Tensor, params: tuple) -> Tensor:
     if _client_connection is None:
         raise RuntimeError(not_connected_error())
 
-    requires_grad = input_tensor.requires_grad
+    requires_grad = is_grad_enabled() and input_tensor.requires_grad
 
     result = Tensor(requires_grad=requires_grad)
 
@@ -770,7 +820,7 @@ def _reduce_op(op: str, input_tensor: Tensor, axis=None, keepdims=False) -> Tens
     if _client_connection is None:
         raise RuntimeError(not_connected_error())
 
-    requires_grad = input_tensor.requires_grad
+    requires_grad = is_grad_enabled() and input_tensor.requires_grad
 
     result = Tensor(requires_grad=requires_grad)
 
@@ -865,6 +915,103 @@ def _process_free_queue():
             _client_connection.recv()  # Wait for response to maintain sync
         except:
             pass  # Connection might be closed
+
+
+def _transpose_op(input_tensor: Tensor, dim0: int, dim1: int) -> Tensor:
+    """Transpose (swap) two specific dimensions."""
+    from gt.transport.protocol import ReshapeOp, ClientResponse
+    from gt.client.autograd import get_graph
+    import numpy as np
+
+    if _client_connection is None:
+        raise RuntimeError(not_connected_error())
+
+    requires_grad = is_grad_enabled() and input_tensor.requires_grad
+    result = Tensor(requires_grad=requires_grad)
+
+    # Use ReshapeOp with "transpose_dims" operation
+    cmd = ReshapeOp(
+        result_id=result.id,
+        op="transpose_dims",
+        input_id=input_tensor.id,
+        params=(dim0, dim1)
+    )
+
+    with _connection_lock:
+        _process_free_queue()
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
+
+    if not response.success:
+        raise RuntimeError(f"transpose failed: {response.error}")
+
+    # Compute result shape
+    if input_tensor.shape:
+        shape_list = list(input_tensor.shape)
+        shape_list[dim0], shape_list[dim1] = shape_list[dim1], shape_list[dim0]
+        result.shape = tuple(shape_list)
+        result.dtype = input_tensor.dtype
+
+    # Record on autograd tape if needed
+    if requires_grad:
+        graph = get_graph()
+
+        def grad_fn(grad_output):
+            # Gradient of transpose is transpose with swapped dims
+            return [grad_output.transpose(dim0, dim1)]
+
+        graph.record(result, [input_tensor], grad_fn)
+
+    return result
+
+
+def _permute_op(input_tensor: Tensor, dims: tuple) -> Tensor:
+    """Permute (rearrange) dimensions."""
+    from gt.transport.protocol import ReshapeOp, ClientResponse
+    from gt.client.autograd import get_graph
+    import numpy as np
+
+    if _client_connection is None:
+        raise RuntimeError(not_connected_error())
+
+    requires_grad = is_grad_enabled() and input_tensor.requires_grad
+    result = Tensor(requires_grad=requires_grad)
+
+    # Use ReshapeOp with "permute" operation
+    cmd = ReshapeOp(
+        result_id=result.id,
+        op="permute",
+        input_id=input_tensor.id,
+        params=dims
+    )
+
+    with _connection_lock:
+        _process_free_queue()
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
+
+    if not response.success:
+        raise RuntimeError(f"permute failed: {response.error}")
+
+    # Compute result shape
+    if input_tensor.shape:
+        result.shape = tuple(input_tensor.shape[i] for i in dims)
+        result.dtype = input_tensor.dtype
+
+    # Record on autograd tape if needed
+    if requires_grad:
+        graph = get_graph()
+
+        def grad_fn(grad_output):
+            # Gradient of permute is inverse permutation
+            inverse_dims = [0] * len(dims)
+            for i, d in enumerate(dims):
+                inverse_dims[d] = i
+            return [grad_output.permute(*inverse_dims)]
+
+        graph.record(result, [input_tensor], grad_fn)
+
+    return result
 
 
 # Factory functions for creating tensors

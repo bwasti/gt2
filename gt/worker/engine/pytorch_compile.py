@@ -329,6 +329,12 @@ class PyTorchCompileEngine(PyTorchEngine):
                 else:
                     dim = op.params[0]
                     result = input_tensor.squeeze(dim)
+            elif op.op_name == 'transpose_dims':
+                dim0, dim1 = op.params
+                result = input_tensor.transpose(dim0, dim1)
+            elif op.op_name == 'permute':
+                dims = op.params
+                result = input_tensor.permute(*dims)
             else:
                 raise ValueError(f"Unknown reshape op: {op.op_name}")
 
@@ -644,6 +650,12 @@ class PyTorchCompileEngine(PyTorchEngine):
                     else:
                         dim = op.params[0]
                         lines.append(f"    {result_var} = {input_var}.squeeze({dim})")
+                elif op.op_name == 'transpose_dims':
+                    dim0, dim1 = op.params
+                    lines.append(f"    {result_var} = {input_var}.transpose({dim0}, {dim1})")
+                elif op.op_name == 'permute':
+                    dims_str = ", ".join(str(d) for d in op.params)
+                    lines.append(f"    {result_var} = {input_var}.permute({dims_str})")
                 else:
                     raise ValueError(f"Unknown reshape op: {op.op_name}")
 
