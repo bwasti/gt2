@@ -343,6 +343,28 @@ def ones(*shape, dtype: str = 'float32', requires_grad: bool = False):
     return _ones(*shape, dtype=dtype, requires_grad=requires_grad)
 
 
+def cat(tensors, axis=0):
+    """
+    Concatenate tensors along an axis.
+
+    Args:
+        tensors: List of tensors to concatenate
+        axis: Axis along which to concatenate (default: 0)
+
+    Returns:
+        Concatenated tensor
+
+    Example:
+        a = gt.randn(10, 20)
+        b = gt.randn(10, 30)
+        c = gt.cat([a, b], axis=1)  # Shape: (10, 50)
+    """
+    _ensure_connected()
+
+    from gt.client.tensor import cat as _cat
+    return _cat(tensors, axis=axis)
+
+
 def from_numpy(array: np.ndarray, requires_grad: bool = False):
     """
     Create a tensor from a numpy array (PyTorch-compatible alias).

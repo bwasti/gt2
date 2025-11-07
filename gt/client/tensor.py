@@ -219,6 +219,10 @@ class Tensor:
         """Greater than comparison: a > b"""
         return _binary_op("gt", self, other)
 
+    def __eq__(self, other):
+        """Element-wise equality: a == b"""
+        return _binary_op("eq", self, other)
+
     # Unary operations
     def exp(self):
         return _unary_op("exp", self)
@@ -344,6 +348,54 @@ class Tensor:
             dims = dims[0]
         return _permute_op(self, dims)
 
+    def split(self, split_size, dim=0):
+        """
+        Split tensor into chunks of size split_size along dimension dim.
+
+        Args:
+            split_size: Size of each chunk
+            dim: Dimension to split along (default: 0)
+
+        Returns:
+            List of tensors
+        """
+        if not self.shape or len(self.shape) <= dim:
+            raise ValueError(f"Cannot split shape {self.shape} along dim {dim}")
+
+        dim_size = self.shape[dim]
+        num_chunks = (dim_size + split_size - 1) // split_size  # Ceiling division
+
+        chunks = []
+        for i in range(num_chunks):
+            start = i * split_size
+            end = min(start + split_size, dim_size)
+
+            # Create slice for this chunk
+            slices = [slice(None)] * len(self.shape)
+            slices[dim] = slice(start, end)
+            chunks.append(self[tuple(slices)])
+
+        return chunks
+
+    def chunk(self, chunks, dim=0):
+        """
+        Split tensor into specific number of chunks along dimension dim.
+
+        Args:
+            chunks: Number of chunks to split into
+            dim: Dimension to split along (default: 0)
+
+        Returns:
+            List of tensors
+        """
+        if not self.shape or len(self.shape) <= dim:
+            raise ValueError(f"Cannot chunk shape {self.shape} along dim {dim}")
+
+        dim_size = self.shape[dim]
+        chunk_size = (dim_size + chunks - 1) // chunks  # Ceiling division
+
+        return self.split(chunk_size, dim=dim)
+
     @property
     def T(self):
         """Transpose property (PyTorch/NumPy style)"""
@@ -442,7 +494,7 @@ def _binary_op(op: str, left, right) -> Tensor:
         raise RuntimeError(f"Operation {op} failed: {response.error}")
 
     # Infer result shape/dtype (TODO: get from dispatcher)
-    if op in ["add", "sub", "mul", "div", "gt"]:
+    if op in ["add", "sub", "mul", "div", "gt", "eq"]:
         # Use NumPy broadcasting rules to compute result shape
         import numpy as np
         result.shape = np.broadcast_shapes(left.shape, right.shape)
@@ -477,33 +529,35 @@ def _binary_op(op: str, left, right) -> Tensor:
                 return grad
 
             # Sum across dimensions that were broadcasted
-            axes_to_sum = []
+            axes_to_remove = []  # Dimensions added by broadcasting (orig didn't have them)
+            axes_to_reduce = []  # Dimensions where orig had 1 but grad has > 1
             grad_shape = list(grad.shape)
             orig_shape = list(original_shape) if original_shape else []
 
-            # Pad orig_shape with 1s on the left
-            while len(orig_shape) < len(grad_shape):
-                orig_shape.insert(0, 1)
-                axes_to_sum.append(0)
+            # Pad orig_shape with 1s on the left to match grad_shape length
+            num_new_dims = len(grad_shape) - len(orig_shape)
+            if num_new_dims > 0:
+                # These dimensions were added by broadcasting - sum and remove them
+                axes_to_remove = list(range(num_new_dims))
+                orig_shape = [1] * num_new_dims + orig_shape
 
             # Find dimensions where original was size 1 but grad is larger
+            # These need to be summed with keepdims=True
             for i in range(len(grad_shape)):
-                if orig_shape[i] == 1 and grad_shape[i] > 1:
-                    axes_to_sum.append(i)
+                if i not in axes_to_remove and orig_shape[i] == 1 and grad_shape[i] > 1:
+                    axes_to_reduce.append(i)
 
-            if axes_to_sum:
-                # ✅ REMOTE EXECUTION: Use tensor operations that execute on worker
-                # This eliminates the need to fetch data to client
-                result = grad
-                for axis in sorted(axes_to_sum, reverse=True):
-                    # Don't use keepdims to avoid needing reshape later
-                    result = result.sum(axis=axis, keepdims=False)
+            result = grad
 
-                # The result shape should now match original_shape
-                # (since we summed without keepdims and in reverse sorted order)
-                return result
+            # First, reduce dimensions where original had size 1 (with keepdims=True)
+            for axis in sorted(axes_to_reduce, reverse=True):
+                result = result.sum(axis=axis, keepdims=True)
 
-            return grad
+            # Then, remove dimensions that were added by broadcasting (with keepdims=False)
+            for axis in sorted(axes_to_remove, reverse=True):
+                result = result.sum(axis=axis, keepdims=False)
+
+            return result
 
         # Define gradient function for this operation
         def grad_fn(grad_output):
@@ -550,7 +604,7 @@ def _binary_op(op: str, left, right) -> Tensor:
                         grad_right = grad_right.sum(axis=0, keepdims=False)
 
                 return [grad_left, grad_right]
-            elif op == "gt":
+            elif op in ["gt", "eq"]:
                 # Comparison operations have zero gradient
                 zero = from_numpy(np.array(0.0, dtype='float32'))
                 return [zero, zero]
@@ -882,8 +936,59 @@ def _reduce_op(op: str, input_tensor: Tensor, axis=None, keepdims=False) -> Tens
                         grad_output = grad_output.unsqueeze(axis)
                     # ✅ REMOTE EXECUTION: Broadcast via tensor operations
                     # Create zeros with input shape, add unsqueezed gradient (broadcasting happens remotely)
-                    result = zeros(*input_tensor.shape, dtype=input_tensor.dtype) + grad_output
-                    return [result]
+                    grad_result = zeros(*input_tensor.shape, dtype=input_tensor.dtype) + grad_output
+                    return [grad_result]
+            elif op == "mean":
+                # grad of mean: broadcast gradient / num_elements to input shape
+                import numpy as np
+                if axis is None:
+                    # Full reduction - mean over all elements
+                    if input_tensor.shape and input_tensor.shape != ():
+                        num_elements = np.prod(input_tensor.shape)
+                        ones = zeros(*input_tensor.shape, dtype=input_tensor.dtype) + from_numpy(np.array(1.0 / num_elements, dtype='float32'))
+                        return [grad_output * ones]
+                    else:
+                        return [grad_output]
+                else:
+                    # Axis-specific reduction
+                    if not keepdims:
+                        grad_output = grad_output.unsqueeze(axis)
+                    # Divide by the size of the reduced dimension
+                    reduced_size = input_tensor.shape[axis]
+                    scale = from_numpy(np.array(1.0 / reduced_size, dtype='float32'))
+                    grad_result = zeros(*input_tensor.shape, dtype=input_tensor.dtype) + (grad_output * scale)
+                    return [grad_result]
+            elif op == "max":
+                # grad of max: gradient flows only to maximum elements
+                # For simplicity, we'll use a mask approach
+                # Note: this is a simplified implementation - in practice, max should cache the indices
+                if axis is None:
+                    # Full reduction - max over all elements
+                    # Create a mask where input == max value
+                    max_val = result  # result is the max value
+                    mask = (input_tensor == max_val)
+                    # Count how many elements are equal to max (for tie-breaking)
+                    # Convert mask to float for counting
+                    count = mask.sum()  # This will be a scalar
+                    # Normalize gradient by count (so if multiple elements are max, they share the gradient)
+                    # grad_output / count * mask
+                    return [grad_output * mask / count]
+                else:
+                    # Axis-specific reduction
+                    # Unsqueeze result and grad_output to match input dimensions
+                    if not keepdims:
+                        max_val = result.unsqueeze(axis)
+                        grad_unsqueezed = grad_output.unsqueeze(axis)
+                    else:
+                        max_val = result
+                        grad_unsqueezed = grad_output
+                    # Create mask where input == max value along axis
+                    mask = (input_tensor == max_val)
+                    # Count matches along the axis (for tie-breaking)
+                    count = mask.sum(axis=axis, keepdims=True)
+                    # Broadcast gradient through mask, normalized by count
+                    grad_result = grad_unsqueezed * mask / count
+                    return [grad_result]
             else:
                 raise RuntimeError(f"Gradient not implemented for axis-aware {op}")
 
@@ -1010,6 +1115,88 @@ def _permute_op(input_tensor: Tensor, dims: tuple) -> Tensor:
             return [grad_output.permute(*inverse_dims)]
 
         graph.record(result, [input_tensor], grad_fn)
+
+    return result
+
+
+def cat(tensors, axis=0):
+    """
+    Concatenate tensors along an axis.
+
+    Args:
+        tensors: List of tensors to concatenate
+        axis: Axis along which to concatenate (default: 0)
+
+    Returns:
+        Concatenated tensor
+
+    Example:
+        a = gt.randn(10, 20)
+        b = gt.randn(10, 30)
+        c = gt.cat([a, b], axis=1)  # Shape: (10, 50)
+    """
+    from gt.transport.protocol import ConcatOp, ClientResponse
+    from gt.client.autograd import get_graph
+    import numpy as np
+
+    if _client_connection is None:
+        raise RuntimeError(not_connected_error())
+
+    if not tensors or len(tensors) == 0:
+        raise ValueError("cat() requires at least one tensor")
+
+    if len(tensors) == 1:
+        return tensors[0]
+
+    # Check if any tensor requires gradients
+    requires_grad = is_grad_enabled() and any(t.requires_grad for t in tensors)
+
+    result = Tensor(requires_grad=requires_grad)
+
+    # Get tensor IDs
+    tensor_ids = [t.id for t in tensors]
+
+    cmd = ConcatOp(
+        result_id=result.id,
+        tensor_ids=tensor_ids,
+        axis=axis
+    )
+
+    with _connection_lock:
+        _process_free_queue()
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
+
+    if not response.success:
+        raise RuntimeError(f"cat failed: {response.error}")
+
+    # Compute result shape
+    if tensors[0].shape:
+        shape_list = list(tensors[0].shape)
+        # Sum up the sizes along the concatenation axis
+        concat_size = sum(t.shape[axis] for t in tensors)
+        shape_list[axis] = concat_size
+        result.shape = tuple(shape_list)
+        result.dtype = tensors[0].dtype
+
+    # Record on autograd tape if needed
+    if requires_grad:
+        graph = get_graph()
+
+        def grad_fn(grad_output):
+            # Gradient of cat is split
+            # Split gradient back to original sizes
+            grads = []
+            start = 0
+            for t in tensors:
+                size = t.shape[axis]
+                slices = [slice(None)] * len(grad_output.shape)
+                slices[axis] = slice(start, start + size)
+                grads.append(grad_output[tuple(slices)])
+                start += size
+            return grads
+
+        graph.record(result, tensors, grad_fn)
 
     return result
 
