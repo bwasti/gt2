@@ -43,7 +43,7 @@ import os
 from typing import Iterator, Optional, Dict, List, Callable
 from gt.debug import debug_print_dispatcher
 from gt.transport.protocol import (
-    ClientCommand, BinaryOp, UnaryOp, CreateTensor, GetData, CompileStart, CompileEnd
+    ClientCommand, BinaryOp, UnaryOp, CreateTensor, GetData, CompileStart, CompileEnd, SliceOp
 )
 
 
@@ -179,6 +179,10 @@ class ShardingStreamModifier:
         elif isinstance(cmd, UnaryOp) and cmd.input_id is not None:
             # UnaryOp with input (transpose, sqrt, relu, etc.)
             yield from self._handle_unary_op(cmd)
+            return
+        elif isinstance(cmd, SliceOp):
+            # SliceOp - need to handle sharded tensors
+            yield from self._handle_slice_op(cmd)
             return
         elif isinstance(cmd, GetData):
             # Let dispatcher handle GetData - it has the complete TensorHandle tracking
@@ -419,6 +423,78 @@ class ShardingStreamModifier:
             input_loc['dtype']
         )
         debug_print_dispatcher(f"[UNARY_OP] Registered result tensor {cmd.result_id} on worker {input_loc['worker_id']}")
+
+    def _handle_slice_op(self, cmd: SliceOp) -> Iterator[ClientCommand]:
+        """
+        Handle slice operation (subscripting).
+
+        If input is sharded, inject GatherShards followed by SliceOp on gathered tensor.
+        """
+        input_locs = self._get_tensor_locations(cmd.input_id)
+
+        if not input_locs:
+            # Tensor not found - pass through
+            debug_print_dispatcher(f"[SLICE_OP] Input tensor {cmd.input_id} not found in tracking")
+            yield cmd
+            return
+
+        # If sharded, inject GatherShards command followed by SliceOp on gathered tensor
+        if len(input_locs) > 1:
+            # Choose first worker for gathering
+            workers = self.get_workers()
+            if workers and len(workers) > 0:
+                target_worker = workers[0]['id']
+
+                # Generate temporary tensor ID for gathered result
+                import time
+                gathered_tensor_id = cmd.input_id + 1000000 + int(time.time() * 1000000) % 1000000
+
+                debug_print_dispatcher(f"[SLICE_OP] Sharded slice - injecting GatherShards({cmd.input_id} → {gathered_tensor_id}) on worker {target_worker}")
+
+                # Inject GatherShards command
+                from gt.transport.protocol import GatherShards
+                gather_cmd = GatherShards(
+                    result_id=gathered_tensor_id,
+                    source_tensor_id=cmd.input_id,
+                    target_worker_id=target_worker
+                )
+                yield gather_cmd
+
+                # Inject modified SliceOp that operates on the gathered tensor
+                modified_cmd = SliceOp(
+                    result_id=cmd.result_id,
+                    input_id=gathered_tensor_id,
+                    key=cmd.key
+                )
+                yield modified_cmd
+
+                # Register result location
+                first_loc = input_locs[0]
+                self._register_tensor_location(
+                    cmd.result_id,
+                    target_worker,
+                    None,  # Shape will be computed by dispatcher
+                    first_loc['dtype']
+                )
+                debug_print_dispatcher(f"[SLICE_OP] Registered result tensor {cmd.result_id} on worker {target_worker}")
+                return
+            else:
+                debug_print_dispatcher(f"[SLICE_OP] No workers available for sharded slice")
+                yield cmd
+                return
+
+        # Single location - pass through (no worker_id needed for SliceOp, dispatcher assigns it)
+        yield cmd
+
+        # Register result location (same worker as input)
+        input_loc = input_locs[0]
+        self._register_tensor_location(
+            cmd.result_id,
+            input_loc['worker_id'],
+            None,  # Shape will be computed by dispatcher
+            input_loc['dtype']
+        )
+        debug_print_dispatcher(f"[SLICE_OP] Registered result tensor {cmd.result_id} on worker {input_loc['worker_id']}")
 
     def _shard_create_tensor(self, cmd: CreateTensor, shard_config) -> Iterator[ClientCommand]:
         """

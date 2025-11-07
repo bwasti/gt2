@@ -779,6 +779,54 @@ def _slice_op(input_tensor: Tensor, key) -> Tensor:
     return result
 
 
+def _resolve_reshape_shape(input_shape: tuple, target_shape: tuple) -> tuple:
+    """
+    Resolve -1 in reshape target shape to actual dimension.
+
+    Args:
+        input_shape: Original tensor shape (e.g., (40000, 256))
+        target_shape: Target shape with possible -1 (e.g., (-1, 256))
+
+    Returns:
+        Resolved shape with no negative dimensions (e.g., (40000, 256))
+    """
+    import numpy as np
+
+    if not input_shape:
+        return target_shape
+
+    # Count -1s in target shape
+    neg_count = sum(1 for d in target_shape if d == -1)
+
+    if neg_count == 0:
+        # No -1, return as-is
+        return target_shape
+
+    if neg_count > 1:
+        raise ValueError("Only one dimension can be -1 in reshape")
+
+    # Calculate total size
+    input_size = np.prod(input_shape)
+
+    # Calculate known dimensions
+    known_size = 1
+    neg_index = -1
+    for i, d in enumerate(target_shape):
+        if d == -1:
+            neg_index = i
+        else:
+            known_size *= d
+
+    # Compute the -1 dimension
+    inferred_dim = int(input_size // known_size)
+
+    # Build result shape
+    result_shape = list(target_shape)
+    result_shape[neg_index] = inferred_dim
+
+    return tuple(result_shape)
+
+
 def _reshape_op(op: str, input_tensor: Tensor, params: tuple) -> Tensor:
     """Execute a reshape operation (reshape, unsqueeze, squeeze)."""
     from gt.transport.protocol import ReshapeOp, ClientResponse
@@ -806,7 +854,8 @@ def _reshape_op(op: str, input_tensor: Tensor, params: tuple) -> Tensor:
 
     # Compute result shape
     if op == "reshape":
-        result.shape = params
+        # Resolve -1 in reshape params to actual dimension
+        result.shape = _resolve_reshape_shape(input_tensor.shape, params)
         result.dtype = input_tensor.dtype
     elif op == "unsqueeze":
         dim = params[0]
