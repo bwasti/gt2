@@ -44,6 +44,11 @@ class Engine(ABC):
         pass
 
     @abstractmethod
+    def ones(self, shape: tuple, dtype: str = 'float32') -> Any:
+        """Create ones tensor."""
+        pass
+
+    @abstractmethod
     def matmul(self, a: Any, b: Any) -> Any:
         """Matrix multiplication."""
         pass
@@ -66,6 +71,11 @@ class Engine(ABC):
     @abstractmethod
     def mean(self, tensor: Any, axis: Optional[int] = None) -> Any:
         """Mean reduction."""
+        pass
+
+    @abstractmethod
+    def max(self, tensor: Any, axis: Optional[int] = None, keepdims: bool = False) -> Any:
+        """Maximum reduction."""
         pass
 
     @abstractmethod

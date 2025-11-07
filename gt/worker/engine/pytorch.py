@@ -40,6 +40,10 @@ class PyTorchEngine(Engine):
         torch_dtype = getattr(self.torch, dtype)
         return self.torch.zeros(*shape, dtype=torch_dtype, device=self.device)
 
+    def ones(self, shape: tuple, dtype: str = 'float32'):
+        torch_dtype = getattr(self.torch, dtype)
+        return self.torch.ones(*shape, dtype=torch_dtype, device=self.device)
+
     def matmul(self, a, b):
         return self.torch.matmul(a, b)
 
@@ -70,6 +74,18 @@ class PyTorchEngine(Engine):
             return self.torch.mean(tensor)
         # Axis-specific reduction
         return self.torch.mean(tensor, dim=axis, keepdim=keepdims)
+
+    def max(self, tensor, axis: Optional[int] = None, keepdims: bool = False):
+        if axis is None:
+            # Full reduction - max of all elements
+            if keepdims:
+                # For keepdims with full reduction, we need to keep all dims as 1
+                shape = tuple([1] * len(tensor.shape))
+                return self.torch.max(tensor).reshape(shape)
+            return self.torch.max(tensor)
+        # Axis-specific reduction
+        # PyTorch max returns (values, indices) for dim-specific max
+        return self.torch.max(tensor, dim=axis, keepdim=keepdims).values
 
     def relu(self, tensor):
         return self.torch.relu(tensor)

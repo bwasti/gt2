@@ -264,11 +264,7 @@ class Worker:
             elif cmd.op == "zeros":
                 result = self.engine.zeros(cmd.shape, cmd.dtype)
             elif cmd.op == "ones":
-                if self.backend_name == "pytorch":
-                    import torch
-                    result = torch.ones(*cmd.shape)
-                else:
-                    result = np.ones(cmd.shape, dtype=cmd.dtype)
+                result = self.engine.ones(cmd.shape, cmd.dtype)
             else:
                 return WorkerResponse(success=False, error=f"Unknown creation op: {cmd.op}")
 
@@ -313,6 +309,10 @@ class Worker:
             axis = getattr(cmd, 'axis', None)
             keepdims = getattr(cmd, 'keepdims', False)
             result = self.engine.mean(input_tensor, axis=axis, keepdims=keepdims)
+        elif cmd.op == "max":
+            axis = getattr(cmd, 'axis', None)
+            keepdims = getattr(cmd, 'keepdims', False)
+            result = self.engine.max(input_tensor, axis=axis, keepdims=keepdims)
         elif cmd.op == "relu":
             result = self.engine.relu(input_tensor)
         elif cmd.op == "sigmoid":

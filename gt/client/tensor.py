@@ -230,12 +230,29 @@ class Tensor:
             # New behavior: axis-aware sum
             return _reduce_op("sum", self, axis=axis, keepdims=keepdims)
 
-    def mean(self):
-        """Compute mean as sum() / n to avoid duplicate gradient code."""
-        import numpy as np
-        total_sum = self.sum()
-        n = np.prod(self.shape) if self.shape else 1
-        return total_sum / from_numpy(np.array(n, dtype='float32'))
+    def mean(self, axis=None, keepdims=False):
+        """Compute mean reduction.
+
+        Args:
+            axis: Axis to reduce. If None, reduces all dimensions.
+            keepdims: If True, retains reduced dimensions with size 1.
+
+        Returns:
+            Tensor with mean values
+        """
+        return _reduce_op("mean", self, axis=axis, keepdims=keepdims)
+
+    def max(self, axis=None, keepdims=False):
+        """Compute maximum reduction.
+
+        Args:
+            axis: Axis to reduce. If None, reduces all dimensions.
+            keepdims: If True, retains reduced dimensions with size 1.
+
+        Returns:
+            Tensor with maximum values
+        """
+        return _reduce_op("max", self, axis=axis, keepdims=keepdims)
 
     def relu(self):
         """ReLU activation: max(0, x)"""
@@ -939,5 +956,34 @@ def zeros(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
 
     if not response.success:
         raise RuntimeError(f"Failed to create zeros tensor: {response.error}")
+
+    return tensor
+
+
+def ones(*shape, dtype="float32", requires_grad: bool = False) -> Tensor:
+    """Create a tensor filled with ones."""
+    from gt.transport.protocol import UnaryOp, ClientResponse
+
+    if _client_connection is None:
+        raise RuntimeError(not_connected_error())
+
+    tensor = Tensor(shape=shape, dtype=dtype, requires_grad=requires_grad)
+
+    cmd = UnaryOp(
+        result_id=tensor.id,
+        op="ones",
+        input_id=None,
+        shape=shape,
+        dtype=dtype
+    )
+    with _connection_lock:
+        # Process any pending frees first
+        _process_free_queue()
+
+        _client_connection.send(cmd)
+        response: ClientResponse = _client_connection.recv()
+
+    if not response.success:
+        raise RuntimeError(f"Failed to create ones tensor: {response.error}")
 
     return tensor

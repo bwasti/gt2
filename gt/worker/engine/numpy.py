@@ -27,6 +27,9 @@ class NumpyEngine(Engine):
     def zeros(self, shape: tuple, dtype: str = 'float32') -> np.ndarray:
         return np.zeros(shape, dtype=dtype)
 
+    def ones(self, shape: tuple, dtype: str = 'float32') -> np.ndarray:
+        return np.ones(shape, dtype=dtype)
+
     def matmul(self, a: np.ndarray, b: np.ndarray) -> np.ndarray:
         return a @ b
 
@@ -39,8 +42,11 @@ class NumpyEngine(Engine):
     def sum(self, tensor: np.ndarray, axis: Optional[int] = None, keepdims: bool = False) -> np.ndarray:
         return np.sum(tensor, axis=axis, keepdims=keepdims)
 
-    def mean(self, tensor: np.ndarray, axis: Optional[int] = None) -> np.ndarray:
-        return np.mean(tensor, axis=axis)
+    def mean(self, tensor: np.ndarray, axis: Optional[int] = None, keepdims: bool = False) -> np.ndarray:
+        return np.mean(tensor, axis=axis, keepdims=keepdims)
+
+    def max(self, tensor: np.ndarray, axis: Optional[int] = None, keepdims: bool = False) -> np.ndarray:
+        return np.max(tensor, axis=axis, keepdims=keepdims)
 
     def relu(self, tensor: np.ndarray) -> np.ndarray:
         return np.maximum(0, tensor)

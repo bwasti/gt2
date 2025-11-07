@@ -321,6 +321,28 @@ def zeros(*shape, dtype: str = 'float32', requires_grad: bool = False):
     return _zeros(*shape, dtype=dtype, requires_grad=requires_grad)
 
 
+def ones(*shape, dtype: str = 'float32', requires_grad: bool = False):
+    """
+    Create a tensor filled with ones.
+
+    Args:
+        *shape: Shape of the tensor
+        dtype: Data type
+        requires_grad: Whether to track gradients (default: False)
+
+    Returns:
+        Tensor object
+
+    Example:
+        a = gt.ones(3, 4)
+        b = gt.ones(10, 10, requires_grad=True)
+    """
+    _ensure_connected()
+
+    from gt.client.tensor import ones as _ones
+    return _ones(*shape, dtype=dtype, requires_grad=requires_grad)
+
+
 def from_numpy(array: np.ndarray, requires_grad: bool = False):
     """
     Create a tensor from a numpy array (PyTorch-compatible alias).

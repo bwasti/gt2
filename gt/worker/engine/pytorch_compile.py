@@ -306,6 +306,10 @@ class PyTorchCompileEngine(PyTorchEngine):
                 params = op.params or {}
                 shape = params.get('shape', ())
                 result = self.torch.zeros(shape)
+            elif op.op_name == 'ones':
+                params = op.params or {}
+                shape = params.get('shape', ())
+                result = self.torch.ones(shape)
             else:
                 raise ValueError(f"Unknown unary op: {op.op_name}")
 
@@ -487,6 +491,10 @@ class PyTorchCompileEngine(PyTorchEngine):
                         params = instr['params'] or {}
                         shape = params.get('shape', ())
                         result = self.torch.zeros(shape)
+                    elif instr['op_name'] == 'ones':
+                        params = instr['params'] or {}
+                        shape = params.get('shape', ())
+                        result = self.torch.ones(shape)
                     else:
                         raise ValueError(f"Unknown unary op: {instr['op_name']}")
 
