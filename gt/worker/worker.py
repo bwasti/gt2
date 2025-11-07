@@ -12,7 +12,7 @@ import numpy as np
 from typing import Dict, Any
 from gt.transport.connection import connect
 from gt.transport.protocol import (
-    WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
+    WorkerCommand, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp, WorkerConcatOp,
     WorkerGetData, WorkerFreeTensor, WorkerHotPathStart, WorkerHotPathEnd, WorkerGetStats, WorkerResponse,
     WorkerBatch, WorkerCompileStart, WorkerCompileEnd
 )
@@ -91,10 +91,11 @@ class Worker:
 
                 # Send response for sync operations and distributed operations
                 # For distributed operations to work, we need responses from these commands:
+                # - WorkerBatch (need to ensure batch completes before GetData)
                 # - WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp (for distributed matmul/reductions)
                 # - WorkerGetData, WorkerGetStats (for data retrieval)
                 # - WorkerCompileStart, WorkerCompileEnd (for compilation sync points)
-                if isinstance(cmd, (WorkerGetData, WorkerGetStats, WorkerCompileStart, WorkerCompileEnd,
+                if isinstance(cmd, (WorkerBatch, WorkerGetData, WorkerGetStats, WorkerCompileStart, WorkerCompileEnd,
                                      WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp)):
                     self.conn.send(response)
                 # For other operations, don't send response - fire and forget!
@@ -197,6 +198,9 @@ class Worker:
         elif isinstance(cmd, WorkerSliceOp):
             return self._handle_slice_op(cmd)
 
+        elif isinstance(cmd, WorkerConcatOp):
+            return self._handle_concat_op(cmd)
+
         else:
             return WorkerResponse(success=False, error=f"Unknown command: {type(cmd)}")
 
@@ -243,6 +247,12 @@ class Worker:
             result = self.engine.matmul(left, right)
         elif cmd.op == "gt":
             result = (left > right)
+            if self.backend_name == "pytorch":
+                result = result.float()
+            else:
+                result = result.astype(np.float32)
+        elif cmd.op == "eq":
+            result = (left == right)
             if self.backend_name == "pytorch":
                 result = result.float()
             else:
@@ -423,6 +433,29 @@ class Worker:
             result = input_tensor[cmd.key]
         except Exception as e:
             return WorkerResponse(success=False, error=f"Slice operation failed: {e}")
+
+        self.tensors[cmd.result_id] = result
+        return WorkerResponse(success=True)
+
+    def _handle_concat_op(self, cmd: WorkerConcatOp) -> WorkerResponse:
+        """Execute concatenation operation."""
+        self.stats['operations']['total'] += 1
+
+        # Get all input tensors
+        input_tensors = []
+        for tensor_id in cmd.tensor_ids:
+            if tensor_id not in self.tensors:
+                return WorkerResponse(success=False, error=f"Input tensor {tensor_id} not found")
+            input_tensors.append(self.tensors[tensor_id])
+
+        # Perform concatenation based on backend
+        try:
+            if self.backend_name == "pytorch":
+                result = self.engine.torch.cat(input_tensors, dim=cmd.axis)
+            else:
+                result = np.concatenate(input_tensors, axis=cmd.axis)
+        except Exception as e:
+            return WorkerResponse(success=False, error=f"Concatenation failed: {e}")
 
         self.tensors[cmd.result_id] = result
         return WorkerResponse(success=True)
