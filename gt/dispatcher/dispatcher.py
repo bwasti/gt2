@@ -227,7 +227,7 @@ class Dispatcher:
 
         # Stream modifiers (signal-driven sharding)
         from gt.dispatcher.sharding_modifier import ShardingStreamModifier
-        self.sharding_modifier = ShardingStreamModifier()
+        self.sharding_modifier = ShardingStreamModifier(get_workers=lambda: self.workers)
 
     def register_worker(self, worker_identity: bytes, worker_id: str):
         """Register a worker by its ZMQ identity."""
@@ -1066,6 +1066,10 @@ Current registered workers: {len(self.workers)}
         from gt.transport.protocol import WorkerGetData, WorkerCreateTensor, WorkerBinaryOp
         import numpy as np
 
+        # Sort shards by index to ensure correct ordering
+        left_locs = sorted(left_locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0)
+        right_locs = sorted(right_locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0)
+
         # Step 1: All-gather B - collect all shards from workers
         b_shards = []
         for loc in right_locs:
@@ -1151,6 +1155,9 @@ Current registered workers: {len(self.workers)}
         """
         from gt.dispatcher.tensor_handle import ShardInfo
         import numpy as np
+
+        # Sort shards by index to ensure correct ordering
+        left_locs = sorted(left_locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0)
 
         # Broadcast B to all workers (if not already there)
         right_loc = right_locs[0]

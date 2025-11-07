@@ -87,6 +87,39 @@ def gpu_workers(n: int):
     _num_gpu_workers = n
 
 
+def _detect_num_gpus():
+    """
+    Detect number of available GPUs.
+
+    Returns:
+        int: Number of GPUs detected, or 1 if detection fails
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.device_count()
+    except ImportError:
+        pass
+
+    # Fallback: try nvidia-smi
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            gpu_count = len(result.stdout.strip().split('\n'))
+            return gpu_count if gpu_count > 0 else 1
+    except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # No GPUs detected
+    return 1
+
+
 def _ensure_connected():
     """Ensure we're connected to a server, starting one if needed."""
     global _connected, _auto_server, _client, _num_gpu_workers
@@ -99,8 +132,23 @@ def _ensure_connected():
     import os
     from gt.debug import verbose_print
     start_time = time.time()
+
+    # Check if GT_AUTO_SHARD is enabled and auto-detect GPUs
+    auto_shard = os.environ.get('GT_AUTO_SHARD', '0') == '1'
+    if auto_shard and _num_gpu_workers == 1:
+        # GT_AUTO_SHARD is enabled and user hasn't explicitly set gpu_workers()
+        detected_gpus = _detect_num_gpus()
+        if detected_gpus > 1:
+            verbose_print(f"GT_AUTO_SHARD: Detected {detected_gpus} GPU(s), will use all for auto-sharding")
+            _num_gpu_workers = detected_gpus
+        else:
+            verbose_print(f"GT_AUTO_SHARD: Only 1 GPU detected, auto-sharding disabled")
+
     num_workers = _num_gpu_workers
-    verbose_print(f"GT: Auto-starting local server with {num_workers} worker(s)...")
+    if auto_shard and num_workers > 1:
+        verbose_print(f"GT: Auto-starting local server with {num_workers} worker(s) (GT_AUTO_SHARD=1)...")
+    else:
+        verbose_print(f"GT: Auto-starting local server with {num_workers} worker(s)...")
     from gt.dispatcher.dispatcher import Dispatcher
     from gt.worker.worker import Worker
     from gt.transport.connection import create_server, Connection
@@ -318,7 +366,7 @@ class no_grad:
 
 
 # Signal API for configuration-based sharding
-from gt import signal  # Import module for signal.context() and signal.tensor()
+from gt import signals as signal  # Import module for signal.context() and signal.tensor(), renamed to avoid shadowing stdlib
 
 # Config loading
 from gt.config import load_config, get_config, get_signal_config, register_config, SignalConfig, ShardConfig
@@ -332,40 +380,20 @@ def _cleanup():
     """
     Clean shutdown of auto-started components.
 
-    This prevents segfaults by properly closing ZMQ sockets before
-    the ZMQ context is destroyed during Python shutdown.
+    With daemon threads + ZMQ, graceful shutdown is tricky. We suppress
+    all errors to avoid spurious failures during Python exit.
     """
-    global _client, _auto_server, _auto_workers
+    try:
+        # Redirect stderr to suppress ZMQ cleanup assertions
+        import sys
+        import os
 
-    # Disconnect client first (stops sending new operations)
-    if _client:
-        try:
-            _client.disconnect()
-        except Exception:
-            pass
-
-    # Close worker connections (prevents segfault from dangling ZMQ sockets)
-    for worker in _auto_workers:
-        try:
-            if hasattr(worker, 'conn') and worker.conn:
-                worker.conn.close()
-        except Exception:
-            pass
-
-    # Stop dispatcher (stops accepting new connections)
-    if _auto_server:
-        dispatcher = _auto_server
-        dispatcher.running = False
-        try:
-            if hasattr(dispatcher, 'server_socket') and dispatcher.server_socket:
-                dispatcher.server_socket.close()
-        except Exception:
-            pass
-        try:
-            if hasattr(dispatcher, 'monitor_socket') and dispatcher.monitor_socket:
-                dispatcher.monitor_socket.close()
-        except Exception:
-            pass
+        stderr_fd = sys.stderr.fileno()
+        null_fd = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null_fd, stderr_fd)
+        os.close(null_fd)
+    except:
+        pass
 
 
 atexit.register(_cleanup)

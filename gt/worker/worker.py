@@ -89,12 +89,15 @@ class Worker:
                 cmd = self.conn.recv()
                 response = self._process_command(cmd)
 
-                # Only send response for operations that return data or are sync points
-                # TCP already handles reliability, so we don't need to ack every operation
-                if isinstance(cmd, (WorkerGetData, WorkerGetStats, WorkerCompileStart, WorkerCompileEnd)):
+                # Send response for sync operations and distributed operations
+                # For distributed operations to work, we need responses from these commands:
+                # - WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp (for distributed matmul/reductions)
+                # - WorkerGetData, WorkerGetStats (for data retrieval)
+                # - WorkerCompileStart, WorkerCompileEnd (for compilation sync points)
+                if isinstance(cmd, (WorkerGetData, WorkerGetStats, WorkerCompileStart, WorkerCompileEnd,
+                                     WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp)):
                     self.conn.send(response)
-                # For other operations (CreateTensor, BinaryOp, etc.), don't send response
-                # The dispatcher doesn't need it - just fire and forget!
+                # For other operations, don't send response - fire and forget!
 
             except Exception as e:
                 print(f"Worker {self.worker_id} error: {e}")

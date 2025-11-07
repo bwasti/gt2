@@ -252,6 +252,91 @@ GT_DEBUG_WORKER=1 GT_DEBUG_COMPILE=1 python my_script.py
 
 **Note:** By default, GT is completely silent - no framework output at all. Only errors are shown. Use `GT_VERBOSE=1` to see startup and connection messages.
 
+### Automatic Sharding (GT_AUTO_SHARD)
+
+GT can automatically shard tensors across all available workers without requiring manual signal configuration.
+
+```bash
+# Enable automatic sharding
+GT_AUTO_SHARD=1 python my_script.py
+```
+
+**How it works:**
+- When `GT_AUTO_SHARD=1`, all tensor creation operations (`gt.randn`, `gt.zeros`, `gt.from_numpy`, etc.) are automatically sharded across all available workers
+- Shards along axis 0 by default
+- Falls back to replication if tensor dimensions aren't evenly divisible by number of workers
+- Signal-based sharding (via `CompileStart`/`CompileEnd`) takes priority over auto-sharding
+
+**Auto-Start Mode Integration:**
+When using auto-start mode (no explicit `gt.connect()`), `GT_AUTO_SHARD=1` automatically:
+- Detects all available GPUs using PyTorch or nvidia-smi
+- Starts one worker per GPU
+- Enables automatic sharding across all detected GPUs
+
+**Example (Auto-Start):**
+```python
+import os
+os.environ['GT_AUTO_SHARD'] = '1'
+
+import gt
+
+# Auto-starts system with ALL detected GPUs (e.g., 8 GPUs → 8 workers)
+# This tensor is automatically sharded: (4096, 64) per worker
+a = gt.randn(32768, 64)  # Total shape: (32768, 64)
+
+# Operations work transparently
+b = gt.randn(64, 128)
+c = a @ b  # Runs in parallel across all GPUs
+
+result = c.data.numpy()  # Automatically gathered: (32768, 128)
+```
+
+**Example (Manual Connection):**
+```python
+import os
+os.environ['GT_AUTO_SHARD'] = '1'
+
+import gt
+
+# Connect to system with 8 workers
+gt.connect('localhost:9000')
+
+# This tensor is automatically sharded as (4096, 64) per worker across 8 workers
+a = gt.randn(32768, 64)  # Total shape: (32768, 64)
+
+# Operations work transparently
+b = gt.randn(64, 128)
+c = a @ b  # Result automatically gathered: (32768, 128)
+
+# Get data (automatically gathers from all workers)
+result = c.data.numpy()
+```
+
+**When to use:**
+- ✅ Training large models with big batch sizes (32K+)
+- ✅ Large matrix operations that benefit from distribution
+- ✅ Quick prototyping without manual sharding configuration
+- ✅ Auto-start mode with multiple GPUs (simplest setup!)
+- ❌ Small tensors (< 1024 on axis 0) - overhead dominates
+- ❌ When you need fine-grained control over placement
+
+**Benchmarking:**
+See `benchmarks/AUTO_SHARD_README.md` for comprehensive benchmarks and performance tips.
+
+```bash
+# Quick benchmark with 8 GPUs
+python benchmarks/quick_benchmark.py --gpus 8 --quick
+
+# Full comparison (1 vs 8 GPUs)
+python benchmarks/quick_benchmark.py --gpus 1 8
+```
+
+**Configuration:**
+- `GT_AUTO_SHARD=0` (default): Disabled, use manual sharding or single worker
+- `GT_AUTO_SHARD=1`: Enabled, automatically shard across all workers
+  - In auto-start mode: Automatically detects and uses all available GPUs
+  - In manual mode: Uses all connected workers
+
 ## Debugging Guide
 
 ### Core Debugging Philosophy
