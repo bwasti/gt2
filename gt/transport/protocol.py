@@ -89,6 +89,26 @@ class CopyTensor(ClientCommand):
 
 
 @dataclass
+class ConcatOp(ClientCommand):
+    """Concatenate multiple tensors along an axis."""
+    result_id: int
+    tensor_ids: list  # List of tensor IDs to concatenate
+    axis: int  # Axis along which to concatenate
+
+
+@dataclass
+class GatherShards(ClientCommand):
+    """Gather sharded tensor into a single tensor on specified worker.
+
+    This is injected by the sharding modifier when it detects an operation
+    on a sharded tensor that requires gathering first.
+    """
+    result_id: int  # New tensor ID for the gathered tensor
+    source_tensor_id: int  # Original sharded tensor ID
+    target_worker_id: str  # Worker to gather onto
+
+
+@dataclass
 class CompileStart(ClientCommand):
     """Mark the start of a signal scope (used for sharding, compilation, etc)."""
     signal_name: str
@@ -216,6 +236,14 @@ class WorkerHotPathEnd(WorkerCommand):
 class WorkerGetStats(WorkerCommand):
     """Request statistics from worker."""
     pass
+
+
+@dataclass
+class WorkerConcatOp(WorkerCommand):
+    """Execute concatenation on worker."""
+    result_id: str
+    tensor_ids: list  # List of tensor IDs to concatenate
+    axis: int  # Axis along which to concatenate
 
 
 @dataclass

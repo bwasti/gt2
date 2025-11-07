@@ -13,8 +13,8 @@ from gt.transport.connection import create_server, Connection
 from gt.debug import debug_print_dispatcher
 from gt.errors import no_workers_error
 from gt.transport.protocol import (
-    ClientCommand, CreateTensor, BinaryOp, UnaryOp, ReshapeOp, SliceOp, GetData, FreeTensor, CopyTensor,
-    CompileStart, CompileEnd, GetWorkerStats, RegisterWorker,
+    ClientCommand, CreateTensor, BinaryOp, UnaryOp, ReshapeOp, SliceOp, GetData, FreeTensor, CopyTensor, ConcatOp,
+    CompileStart, CompileEnd, GetWorkerStats, RegisterWorker, GatherShards,
     ClientResponse, WorkerCreateTensor, WorkerBinaryOp, WorkerUnaryOp, WorkerReshapeOp, WorkerSliceOp,
     WorkerGetData, WorkerFreeTensor, WorkerCompileStart, WorkerCompileEnd, WorkerGetStats, WorkerResponse,
     serialize, deserialize
@@ -319,6 +319,7 @@ class Dispatcher:
         Send all buffered commands to a worker in a single batch.
 
         This reduces network overhead by sending multiple operations together.
+        We wait for batch completion to ensure tensors exist before GetData.
         """
         from gt.transport.protocol import WorkerBatch
 
@@ -336,6 +337,12 @@ class Dispatcher:
         commands = [cmd for cmd, _ in buffered]
         batch = WorkerBatch(commands=commands)
         send_size = self._send_to_worker(worker, batch)
+
+        # Wait for batch to complete (worker will send response)
+        response, recv_size = self._recv_from_worker(worker)
+        self._log_worker_response(worker_id, "WorkerBatch", response.success, size_bytes=recv_size)
+        if not response.success:
+            debug_print_dispatcher(f"[BATCH] Worker {worker_id} batch failed: {response.error}")
 
         # Log the batch
         cmd_types = ", ".join(cmd_type for _, cmd_type in buffered[:5])  # Show first 5
@@ -463,6 +470,15 @@ class Dispatcher:
                     # Run command through sharding modifier (may yield multiple commands)
                     response = None
                     for modified_cmd in self.sharding_modifier.process(cmd):
+                        # Log each modified/injected command
+                        modified_cmd_type = type(modified_cmd).__name__
+                        self.instruction_stream.log(
+                            "MODIFIER_INJECT",
+                            f"{source_type} {source_id}",
+                            modified_cmd_type,
+                            self._get_cmd_details(modified_cmd)
+                        )
+
                         response = self._process_command(modified_cmd, source_id)
                         # Verify we got a proper response
                         if not isinstance(response, ClientResponse):
@@ -558,6 +574,10 @@ class Dispatcher:
                 return self._handle_free_tensor(cmd, client_id)
             elif isinstance(cmd, CopyTensor):
                 return self._handle_copy_tensor(cmd, client_id)
+            elif isinstance(cmd, ConcatOp):
+                return self._handle_concat_op(cmd, client_id)
+            elif isinstance(cmd, GatherShards):
+                return self._handle_gather_shards(cmd, client_id)
             elif isinstance(cmd, CompileStart):
                 return self._handle_compile_start(cmd, client_id)
             elif isinstance(cmd, CompileEnd):
@@ -630,14 +650,23 @@ class Dispatcher:
         left_sharded = len(left_locs) > 1
         right_sharded = len(right_locs) > 1
 
-        # DISTRIBUTED MATMUL: A @ B where A is sharded
-        if cmd.op == "matmul" and left_sharded:
-            if right_sharded:
+        # DISTRIBUTED MATMUL: Special handling for sharded matmul
+        if cmd.op == "matmul" and (left_sharded or right_sharded):
+            if left_sharded and right_sharded:
                 # Both sharded: need all-gather for B
                 return self._handle_distributed_matmul_both_sharded(cmd, client_id, left_locs, right_locs)
-            else:
+            elif left_sharded:
                 # Only A sharded: embarrassingly parallel
                 return self._handle_distributed_matmul(cmd, client_id, left_locs, right_locs)
+            else:
+                # Only B sharded: gather B and broadcast to all workers with A
+                # For now, use general sharded tensor handling
+                return self._handle_binary_op_with_sharded_tensors(cmd, client_id, left_locs, right_locs)
+
+        # HANDLE SHARDED TENSORS FOR ALL OTHER OPERATIONS
+        # If either tensor is sharded, gather all shards first
+        if left_sharded or right_sharded:
+            return self._handle_binary_op_with_sharded_tensors(cmd, client_id, left_locs, right_locs)
 
         # Non-sharded case (or both on same worker)
         left_loc = left_locs[0]
@@ -651,6 +680,9 @@ class Dispatcher:
 
             if not left_worker or not right_worker:
                 return ClientResponse(success=False, error="Worker not found")
+
+            # Flush all buffers to ensure tensors exist before fetching
+            self._flush_all_worker_buffers()
 
             # Fetch right tensor data
             get_cmd = WorkerGetData(tensor_id=right_loc.worker_tensor_id)
@@ -792,7 +824,11 @@ Current registered workers: {len(self.workers)}
             # Distributed reduction - needs all-reduce
             return self._handle_distributed_reduction(cmd, client_id, input_locs)
 
-        # Non-sharded case or non-reduction operation
+        if is_sharded:
+            # Sharded non-reduction operation - gather all shards first, then execute
+            return self._handle_unary_op_on_sharded_tensor(cmd, client_id, input_locs)
+
+        # Non-sharded case
         input_loc = input_locs[0]
         worker = self._get_worker(input_loc.worker_id)
         if not worker:
@@ -830,10 +866,9 @@ Current registered workers: {len(self.workers)}
         if not input_locs:
             return ClientResponse(success=False, error="Input tensor not found")
 
-        # For now, only support non-sharded tensors
-        # TODO: Handle sharded tensors (would need to slice each shard appropriately)
+        # Handle sharded tensors: gather all shards and perform slice on full tensor
         if len(input_locs) > 1:
-            return ClientResponse(success=False, error="Slice on sharded tensors not yet supported")
+            return self._handle_slice_op_on_sharded_tensor(cmd, client_id, input_locs)
 
         input_loc = input_locs[0]
         worker = self._get_worker(input_loc.worker_id)
@@ -865,16 +900,15 @@ Current registered workers: {len(self.workers)}
         return ClientResponse(success=True)
 
     def _handle_reshape_op(self, cmd: ReshapeOp, client_id: str) -> ClientResponse:
-        """Handle reshape operation (reshape, unsqueeze, squeeze)."""
+        """Handle reshape operation (reshape, unsqueeze, squeeze, transpose, permute)."""
         # Get location of input tensor
         input_locs = self.tensor_handles.get_locations(client_id, cmd.input_id)
         if not input_locs:
             return ClientResponse(success=False, error="Input tensor not found")
 
-        # For now, only support non-sharded tensors
-        # TODO: Handle sharded tensors (would need to reshape each shard)
+        # Handle sharded tensors: gather all shards and perform reshape on full tensor
         if len(input_locs) > 1:
-            return ClientResponse(success=False, error="Reshape on sharded tensors not yet supported")
+            return self._handle_reshape_op_on_sharded_tensor(cmd, client_id, input_locs)
 
         input_loc = input_locs[0]
         worker = self._get_worker(input_loc.worker_id)
@@ -1053,6 +1087,261 @@ Current registered workers: {len(self.workers)}
         dest_loc.shape = src_loc.shape
         dest_loc.dtype = src_loc.dtype
 
+        return ClientResponse(success=True)
+
+    def _handle_concat_op(self, cmd: ConcatOp, client_id: str) -> ClientResponse:
+        """Handle concatenation of multiple tensors along an axis."""
+        from gt.transport.protocol import WorkerConcatOp
+
+        # Get locations of all input tensors
+        tensor_locs = []
+        for tensor_id in cmd.tensor_ids:
+            locs = self.tensor_handles.get_locations(client_id, tensor_id)
+            if not locs:
+                return ClientResponse(success=False, error=f"Input tensor {tensor_id} not found")
+            # For now, only support non-sharded tensors
+            if len(locs) > 1:
+                return ClientResponse(success=False, error="Concat on sharded tensors not yet supported")
+            tensor_locs.append(locs[0])
+
+        # All tensors must be on the same worker (for simplicity)
+        # TODO: In future, could move tensors to a common worker
+        first_worker_id = tensor_locs[0].worker_id
+        if not all(loc.worker_id == first_worker_id for loc in tensor_locs):
+            return ClientResponse(success=False, error="Concat requires all tensors on the same worker")
+
+        worker = self._get_worker(first_worker_id)
+        if not worker:
+            return ClientResponse(success=False, error="Worker not found")
+
+        # Create result tensor ID
+        result_tensor_id = f"{client_id}_{cmd.result_id}"
+
+        # Compute result shape (concatenate along specified axis)
+        # If any input shape is None, result shape is None (will be inferred later)
+        result_shape = None
+        if all(loc.shape is not None for loc in tensor_locs):
+            result_shape = list(tensor_locs[0].shape)
+            concat_dim_size = sum(loc.shape[cmd.axis] for loc in tensor_locs)
+            result_shape[cmd.axis] = concat_dim_size
+            result_shape = tuple(result_shape)
+
+        # Register result location FIRST (optimistic)
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_tensor_id,
+            shape=result_shape,
+            dtype=tensor_locs[0].dtype
+        )
+
+        # Send command to worker asynchronously
+        worker_tensor_ids = [loc.worker_tensor_id for loc in tensor_locs]
+        worker_cmd = WorkerConcatOp(
+            result_id=result_tensor_id,
+            tensor_ids=worker_tensor_ids,
+            axis=cmd.axis
+        )
+        self._send_to_worker_async(worker, worker_cmd, "WorkerConcatOp")
+
+        # Return immediate ack to client
+        return ClientResponse(success=True)
+
+    def _handle_gather_shards(self, cmd: GatherShards, client_id: str) -> ClientResponse:
+        """
+        Handle GatherShards command - gather all shards of a tensor onto a target worker.
+
+        This is injected by the sharding modifier when an operation requires a full tensor.
+        Handles both sharded tensors (need concatenation) and replicated tensors (just pick one).
+        """
+        from gt.transport.protocol import WorkerGetData, WorkerCreateTensor
+        import numpy as np
+
+        # Flush all buffers to ensure shards exist
+        self._flush_all_worker_buffers()
+
+        # Get locations of source tensor
+        source_locs = self.tensor_handles.get_locations(client_id, cmd.source_tensor_id)
+        if not source_locs:
+            return ClientResponse(success=False, error=f"Source tensor {cmd.source_tensor_id} not found")
+
+        # If already on single worker
+        if len(source_locs) == 1:
+            loc = source_locs[0]
+
+            # If source is already on target worker, just create an alias in TensorHandle
+            if loc.worker_id == cmd.target_worker_id:
+                debug_print_dispatcher(f"[GATHER] Tensor {cmd.source_tensor_id} already on target worker {cmd.target_worker_id}")
+                # Register the gathered tensor (points to same physical tensor)
+                self.tensor_handles.register(
+                    client_id=client_id,
+                    tensor_id=cmd.result_id,
+                    worker_id=loc.worker_id,
+                    worker_tensor_id=loc.worker_tensor_id,  # Same physical tensor
+                    shape=loc.shape,
+                    dtype=loc.dtype
+                )
+                return ClientResponse(success=True)
+
+            # Otherwise, need to copy to target worker
+            worker = self._get_worker(loc.worker_id)
+            target_worker = self._get_worker(cmd.target_worker_id)
+            if not worker or not target_worker:
+                return ClientResponse(success=False, error="Worker not found")
+
+            # Fetch from source worker
+            get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+            self._send_to_worker(worker, get_cmd)
+            response, _ = self._recv_from_worker(worker)
+            if not response.success:
+                return ClientResponse(success=False, error=f"Failed to get tensor: {response.error}")
+
+            # Create on target worker
+            gathered_tensor_id = f"{client_id}_{cmd.result_id}"
+            create_cmd = WorkerCreateTensor(
+                tensor_id=gathered_tensor_id,
+                data=response.data,
+                dtype=loc.dtype,
+                shape=response.data.shape
+            )
+            self._send_to_worker(target_worker, create_cmd)
+            create_response, _ = self._recv_from_worker(target_worker)
+            if not create_response.success:
+                return ClientResponse(success=False, error=f"Failed to create tensor: {create_response.error}")
+
+            # Register the gathered tensor
+            self.tensor_handles.register(
+                client_id=client_id,
+                tensor_id=cmd.result_id,
+                worker_id=cmd.target_worker_id,
+                worker_tensor_id=gathered_tensor_id,
+                shape=response.data.shape,
+                dtype=loc.dtype
+            )
+            debug_print_dispatcher(f"[GATHER] Copied tensor {cmd.source_tensor_id} → {cmd.result_id} to worker {cmd.target_worker_id}")
+            return ClientResponse(success=True)
+
+        # Multiple locations - check if sharded or replicated
+        first_loc = source_locs[0]
+        is_sharded = first_loc.shard_info is not None
+
+        if not is_sharded:
+            # REPLICATED tensor - same data on all workers, just pick the one on target worker
+            debug_print_dispatcher(f"[GATHER] Tensor {cmd.source_tensor_id} is replicated across {len(source_locs)} workers")
+
+            # Check if already on target worker
+            target_loc = None
+            for loc in source_locs:
+                if loc.worker_id == cmd.target_worker_id:
+                    target_loc = loc
+                    break
+
+            if target_loc:
+                # Already on target worker - just create alias
+                debug_print_dispatcher(f"[GATHER] Replicated tensor already on target worker {cmd.target_worker_id}")
+                self.tensor_handles.register(
+                    client_id=client_id,
+                    tensor_id=cmd.result_id,
+                    worker_id=target_loc.worker_id,
+                    worker_tensor_id=target_loc.worker_tensor_id,  # Same physical tensor
+                    shape=target_loc.shape,
+                    dtype=target_loc.dtype
+                )
+                return ClientResponse(success=True)
+
+            # Not on target worker - copy from any worker to target
+            source_loc = source_locs[0]
+            worker = self._get_worker(source_loc.worker_id)
+            target_worker = self._get_worker(cmd.target_worker_id)
+            if not worker or not target_worker:
+                return ClientResponse(success=False, error="Worker not found")
+
+            # Fetch from source worker
+            get_cmd = WorkerGetData(tensor_id=source_loc.worker_tensor_id)
+            self._send_to_worker(worker, get_cmd)
+            response, _ = self._recv_from_worker(worker)
+            if not response.success:
+                return ClientResponse(success=False, error=f"Failed to get replicated tensor: {response.error}")
+
+            # Create on target worker
+            gathered_tensor_id = f"{client_id}_{cmd.result_id}"
+            create_cmd = WorkerCreateTensor(
+                tensor_id=gathered_tensor_id,
+                data=response.data,
+                dtype=source_loc.dtype,
+                shape=response.data.shape
+            )
+            self._send_to_worker(target_worker, create_cmd)
+            create_response, _ = self._recv_from_worker(target_worker)
+            if not create_response.success:
+                return ClientResponse(success=False, error=f"Failed to create replicated tensor: {create_response.error}")
+
+            # Register the gathered tensor
+            self.tensor_handles.register(
+                client_id=client_id,
+                tensor_id=cmd.result_id,
+                worker_id=cmd.target_worker_id,
+                worker_tensor_id=gathered_tensor_id,
+                shape=response.data.shape,
+                dtype=source_loc.dtype
+            )
+            debug_print_dispatcher(f"[GATHER] Copied replicated tensor {cmd.source_tensor_id} → {cmd.result_id} to worker {cmd.target_worker_id}")
+            return ClientResponse(success=True)
+
+        # SHARDED tensor - gather all shards and concatenate
+        debug_print_dispatcher(f"[GATHER] Gathering {len(source_locs)} shards of tensor {cmd.source_tensor_id} onto worker {cmd.target_worker_id}")
+
+        # Collect all shards
+        shards = []
+        for loc in sorted(source_locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0):
+            worker = self._get_worker(loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
+
+            get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+            self._send_to_worker(worker, get_cmd)
+            response, _ = self._recv_from_worker(worker)
+
+            if not response.success:
+                return ClientResponse(success=False, error=f"Failed to get shard: {response.error}")
+
+            shards.append(response.data)
+
+        # Concatenate along the sharded axis
+        shard_axis = first_loc.shard_info.axis
+        full_data = np.concatenate(shards, axis=shard_axis)
+
+        # Get target worker
+        target_worker = self._get_worker(cmd.target_worker_id)
+        if not target_worker:
+            return ClientResponse(success=False, error=f"Target worker {cmd.target_worker_id} not found")
+
+        # Create gathered tensor on target worker
+        gathered_tensor_id = f"{client_id}_{cmd.result_id}"
+        create_cmd = WorkerCreateTensor(
+            tensor_id=gathered_tensor_id,
+            data=full_data,
+            dtype=first_loc.dtype,
+            shape=full_data.shape
+        )
+        self._send_to_worker(target_worker, create_cmd)
+        response, _ = self._recv_from_worker(target_worker)
+
+        if not response.success:
+            return ClientResponse(success=False, error=f"Failed to create gathered tensor: {response.error}")
+
+        # Register the gathered tensor
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=cmd.target_worker_id,
+            worker_tensor_id=gathered_tensor_id,
+            shape=full_data.shape,
+            dtype=first_loc.dtype
+        )
+
+        debug_print_dispatcher(f"[GATHER] Successfully gathered tensor {cmd.source_tensor_id} → {cmd.result_id} on worker {cmd.target_worker_id}")
         return ClientResponse(success=True)
 
     def _handle_distributed_matmul_both_sharded(self, cmd: BinaryOp, client_id: str, left_locs, right_locs) -> ClientResponse:
@@ -1234,6 +1523,338 @@ Current registered workers: {len(self.workers)}
 
         return ClientResponse(success=True)
 
+    def _handle_binary_op_with_sharded_tensors(self, cmd: BinaryOp, client_id: str, left_locs, right_locs) -> ClientResponse:
+        """
+        Handle binary operation when one or both tensors are sharded.
+
+        Strategy: Gather all shards to reconstruct full tensors, then execute operation on a single worker.
+        """
+        from gt.transport.protocol import WorkerGetData, WorkerCreateTensor, WorkerBinaryOp
+        import numpy as np
+
+        # Flush all buffers to ensure all pending operations complete before gathering
+        self._flush_all_worker_buffers()
+
+        # Helper function to gather a sharded tensor
+        def gather_tensor(locs, tensor_id):
+            """Gather all shards of a tensor and return the full data."""
+            if len(locs) == 1:
+                # Not sharded, just fetch directly
+                loc = locs[0]
+                worker = self._get_worker(loc.worker_id)
+                if not worker:
+                    return None, "Worker not found"
+
+                get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+                self._send_to_worker(worker, get_cmd)
+                response, _ = self._recv_from_worker(worker)
+
+                if not response.success:
+                    return None, f"Failed to fetch tensor: {response.error}"
+
+                return response.data, None
+            else:
+                # Sharded - gather all shards
+                shards = []
+                for loc in sorted(locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0):
+                    worker = self._get_worker(loc.worker_id)
+                    if not worker:
+                        return None, f"Worker {loc.worker_id} not found"
+
+                    get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+                    self._send_to_worker(worker, get_cmd)
+                    response, _ = self._recv_from_worker(worker)
+
+                    if not response.success:
+                        return None, f"Failed to get shard from {loc.worker_id}: {response.error}"
+
+                    shards.append(response.data)
+
+                # Concatenate along the sharded axis
+                shard_axis = locs[0].shard_info.axis if locs[0].shard_info else 0
+                full_data = np.concatenate(shards, axis=shard_axis)
+                return full_data, None
+
+        # Gather left tensor
+        left_data, error = gather_tensor(left_locs, cmd.left_id)
+        if error:
+            return ClientResponse(success=False, error=f"Failed to gather left tensor: {error}")
+
+        # Gather right tensor
+        right_data, error = gather_tensor(right_locs, cmd.right_id)
+        if error:
+            return ClientResponse(success=False, error=f"Failed to gather right tensor: {error}")
+
+        # Pick a worker to execute the operation (use first available worker)
+        worker = self._pick_worker()
+        if not worker:
+            return ClientResponse(success=False, error="No workers available")
+
+        # Create both tensors on the worker
+        left_worker_id = f"{client_id}_{cmd.left_id}_gathered"
+        right_worker_id = f"{client_id}_{cmd.right_id}_gathered"
+
+        # Get dtype from original locations
+        left_dtype = left_locs[0].dtype
+        right_dtype = right_locs[0].dtype
+
+        # Create left tensor
+        create_left = WorkerCreateTensor(
+            tensor_id=left_worker_id,
+            data=left_data,
+            dtype=left_dtype,
+            shape=left_data.shape
+        )
+        self._send_to_worker(worker, create_left)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Failed to create left tensor: {response.error}")
+
+        # Create right tensor
+        create_right = WorkerCreateTensor(
+            tensor_id=right_worker_id,
+            data=right_data,
+            dtype=right_dtype,
+            shape=right_data.shape
+        )
+        self._send_to_worker(worker, create_right)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Failed to create right tensor: {response.error}")
+
+        # Execute the binary operation
+        result_worker_id = f"{client_id}_{cmd.result_id}"
+        binary_op = WorkerBinaryOp(
+            result_id=result_worker_id,
+            op=cmd.op,
+            left_id=left_worker_id,
+            right_id=right_worker_id
+        )
+        self._send_to_worker(worker, binary_op)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Operation failed: {response.error}")
+
+        # Register result (non-sharded, on single worker)
+        import numpy as np
+
+        # Compute result shape based on operation
+        if cmd.op == "matmul":
+            # Matmul shape rules: (*, m, n) @ (*, n, p) -> (*, m, p)
+            if len(left_data.shape) >= 2 and len(right_data.shape) >= 2:
+                result_shape = left_data.shape[:-1] + (right_data.shape[-1],)
+            else:
+                result_shape = left_data.shape  # Fallback
+        else:
+            # Element-wise operations use broadcasting
+            result_shape = np.broadcast_shapes(left_data.shape, right_data.shape)
+
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_worker_id,
+            shape=result_shape,
+            dtype=left_dtype
+        )
+
+        return ClientResponse(success=True)
+
+    def _handle_reshape_op_on_sharded_tensor(self, cmd: ReshapeOp, client_id: str, input_locs) -> ClientResponse:
+        """Handle reshape operation on a sharded tensor by gathering all shards first."""
+        from gt.transport.protocol import WorkerGetData, WorkerCreateTensor, WorkerReshapeOp
+        import numpy as np
+
+        # Flush all buffers to ensure all pending operations complete before gathering
+        self._flush_all_worker_buffers()
+
+        # Gather all shards
+        shards = []
+        for loc in sorted(input_locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0):
+            worker = self._get_worker(loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
+
+            get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+            self._send_to_worker(worker, get_cmd)
+            response, _ = self._recv_from_worker(worker)
+
+            if not response.success:
+                return ClientResponse(success=False, error=f"Failed to get shard: {response.error}")
+
+            shards.append(response.data)
+
+        # Concatenate all shards along the sharded axis
+        shard_axis = input_locs[0].shard_info.axis if input_locs[0].shard_info else 0
+        full_data = np.concatenate(shards, axis=shard_axis)
+
+        # Pick a worker to execute the reshape
+        worker = self._pick_worker()
+        if not worker:
+            return ClientResponse(success=False, error="No workers available")
+
+        # Create the full tensor on the worker
+        input_worker_id = f"{client_id}_{cmd.input_id}_gathered"
+        create_cmd = WorkerCreateTensor(
+            tensor_id=input_worker_id,
+            data=full_data,
+            dtype=input_locs[0].dtype,
+            shape=full_data.shape
+        )
+        self._send_to_worker(worker, create_cmd)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Failed to create tensor: {response.error}")
+
+        # Execute the reshape operation
+        result_worker_id = f"{client_id}_{cmd.result_id}"
+        reshape_cmd = WorkerReshapeOp(
+            result_id=result_worker_id,
+            op=cmd.op,
+            input_id=input_worker_id,
+            params=cmd.params
+        )
+        self._send_to_worker(worker, reshape_cmd)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Reshape failed: {response.error}")
+
+        # Compute result shape (same logic as non-sharded case)
+        if cmd.op == "reshape":
+            result_shape = cmd.params
+        elif cmd.op == "unsqueeze":
+            dim = cmd.params[0]
+            if full_data.shape:
+                shape_list = list(full_data.shape)
+                if dim < 0:
+                    dim = len(shape_list) + dim + 1
+                shape_list.insert(dim, 1)
+                result_shape = tuple(shape_list)
+            else:
+                result_shape = (1,)
+        elif cmd.op == "squeeze":
+            if full_data.shape:
+                if len(cmd.params) == 0:
+                    result_shape = tuple(d for d in full_data.shape if d != 1)
+                else:
+                    dim = cmd.params[0]
+                    shape_list = list(full_data.shape)
+                    if shape_list[dim] == 1:
+                        shape_list.pop(dim)
+                    result_shape = tuple(shape_list)
+            else:
+                result_shape = ()
+        elif cmd.op == "transpose" or cmd.op == "transpose_dims":
+            # Transpose swaps last two dimensions (or specific dims for transpose_dims)
+            if full_data.shape and len(full_data.shape) >= 2:
+                new_shape = list(full_data.shape)
+                if cmd.op == "transpose_dims":
+                    dim0, dim1 = cmd.params
+                    new_shape[dim0], new_shape[dim1] = new_shape[dim1], new_shape[dim0]
+                else:
+                    new_shape[-2], new_shape[-1] = new_shape[-1], new_shape[-2]
+                result_shape = tuple(new_shape)
+            else:
+                result_shape = full_data.shape
+        elif cmd.op == "permute":
+            # Permute rearranges dimensions
+            if full_data.shape:
+                result_shape = tuple(full_data.shape[i] for i in cmd.params)
+            else:
+                result_shape = ()
+        else:
+            result_shape = full_data.shape
+
+        # Register result (non-sharded, on single worker)
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_worker_id,
+            shape=result_shape,
+            dtype=input_locs[0].dtype
+        )
+
+        return ClientResponse(success=True)
+
+    def _handle_slice_op_on_sharded_tensor(self, cmd: SliceOp, client_id: str, input_locs) -> ClientResponse:
+        """Handle slice operation on a sharded tensor by gathering all shards first."""
+        from gt.transport.protocol import WorkerGetData, WorkerCreateTensor, WorkerSliceOp
+        import numpy as np
+
+        # Flush all buffers to ensure all pending operations complete before gathering
+        self._flush_all_worker_buffers()
+
+        # Gather all shards
+        shards = []
+        for loc in sorted(input_locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0):
+            worker = self._get_worker(loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
+
+            get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+            self._send_to_worker(worker, get_cmd)
+            response, _ = self._recv_from_worker(worker)
+
+            if not response.success:
+                return ClientResponse(success=False, error=f"Failed to get shard: {response.error}")
+
+            shards.append(response.data)
+
+        # Concatenate all shards along the sharded axis
+        shard_axis = input_locs[0].shard_info.axis if input_locs[0].shard_info else 0
+        full_data = np.concatenate(shards, axis=shard_axis)
+
+        # Pick a worker to execute the slice
+        worker = self._pick_worker()
+        if not worker:
+            return ClientResponse(success=False, error="No workers available")
+
+        # Create the full tensor on the worker
+        input_worker_id = f"{client_id}_{cmd.input_id}_gathered"
+        create_cmd = WorkerCreateTensor(
+            tensor_id=input_worker_id,
+            data=full_data,
+            dtype=input_locs[0].dtype,
+            shape=full_data.shape
+        )
+        self._send_to_worker(worker, create_cmd)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Failed to create tensor: {response.error}")
+
+        # Execute the slice operation
+        result_worker_id = f"{client_id}_{cmd.result_id}"
+        slice_cmd = WorkerSliceOp(
+            result_id=result_worker_id,
+            input_id=input_worker_id,
+            key=cmd.key
+        )
+        self._send_to_worker(worker, slice_cmd)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Slice failed: {response.error}")
+
+        # Compute result shape using numpy
+        try:
+            dummy = np.empty(full_data.shape)
+            sliced = dummy[cmd.key]
+            result_shape = sliced.shape
+        except:
+            result_shape = None  # Defer to runtime
+
+        # Register result (non-sharded, on single worker)
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_worker_id,
+            shape=result_shape,
+            dtype=input_locs[0].dtype
+        )
+
+        return ClientResponse(success=True)
+
     def _handle_distributed_reduction(self, cmd: UnaryOp, client_id: str, input_locs) -> ClientResponse:
         """
         Handle distributed reduction (sum/mean) on sharded tensor.
@@ -1321,6 +1942,78 @@ Current registered workers: {len(self.workers)}
             worker_id=first_worker["id"],
             worker_tensor_id=result_tensor_id,
             shape=result_data.shape,
+            dtype=input_locs[0].dtype
+        )
+
+        return ClientResponse(success=True)
+
+    def _handle_unary_op_on_sharded_tensor(self, cmd: UnaryOp, client_id: str, input_locs) -> ClientResponse:
+        """Handle unary operation on a sharded tensor by gathering all shards first."""
+        from gt.transport.protocol import WorkerGetData, WorkerCreateTensor, WorkerUnaryOp
+        import numpy as np
+
+        # Flush all buffers to ensure all pending operations complete before gathering
+        self._flush_all_worker_buffers()
+
+        # Gather all shards
+        shards = []
+        for loc in sorted(input_locs, key=lambda l: l.shard_info.shard_index if l.shard_info else 0):
+            worker = self._get_worker(loc.worker_id)
+            if not worker:
+                return ClientResponse(success=False, error=f"Worker {loc.worker_id} not found")
+
+            get_cmd = WorkerGetData(tensor_id=loc.worker_tensor_id)
+            self._send_to_worker(worker, get_cmd)
+            response, _ = self._recv_from_worker(worker)
+
+            if not response.success:
+                return ClientResponse(success=False, error=f"Failed to get shard: {response.error}")
+
+            shards.append(response.data)
+
+        # Concatenate all shards along the sharded axis
+        shard_axis = input_locs[0].shard_info.axis if input_locs[0].shard_info else 0
+        full_data = np.concatenate(shards, axis=shard_axis)
+
+        # Pick a worker to execute the unary op
+        worker = self._pick_worker()
+        if not worker:
+            return ClientResponse(success=False, error="No workers available")
+
+        # Create the full tensor on the worker
+        input_worker_id = f"{client_id}_{cmd.input_id}_gathered"
+        create_cmd = WorkerCreateTensor(
+            tensor_id=input_worker_id,
+            data=full_data,
+            dtype=input_locs[0].dtype,
+            shape=full_data.shape
+        )
+        self._send_to_worker(worker, create_cmd)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Failed to create tensor: {response.error}")
+
+        # Execute the unary operation
+        result_worker_id = f"{client_id}_{cmd.result_id}"
+        unary_cmd = WorkerUnaryOp(
+            result_id=result_worker_id,
+            op=cmd.op,
+            input_id=input_worker_id,
+            axis=getattr(cmd, 'axis', None),
+            keepdims=getattr(cmd, 'keepdims', False)
+        )
+        self._send_to_worker(worker, unary_cmd)
+        response, _ = self._recv_from_worker(worker)
+        if not response.success:
+            return ClientResponse(success=False, error=f"Unary op failed: {response.error}")
+
+        # Register result (non-sharded, on single worker)
+        self.tensor_handles.register(
+            client_id=client_id,
+            tensor_id=cmd.result_id,
+            worker_id=worker["id"],
+            worker_tensor_id=result_worker_id,
+            shape=full_data.shape,  # TODO: compute actual result shape based on operation
             dtype=input_locs[0].dtype
         )
 
@@ -1490,6 +2183,10 @@ Current registered workers: {len(self.workers)}
             return f"tensor_id={cmd.tensor_id}"
         elif isinstance(cmd, CopyTensor):
             return f"dest={cmd.dest_id} src={cmd.src_id}"
+        elif isinstance(cmd, ConcatOp):
+            return f"result={cmd.result_id} tensors={cmd.tensor_ids} axis={cmd.axis}"
+        elif isinstance(cmd, GatherShards):
+            return f"result={cmd.result_id} source={cmd.source_tensor_id} target_worker={cmd.target_worker_id}"
         elif isinstance(cmd, RegisterWorker):
             return f"worker_id={cmd.worker_id}"
         elif isinstance(cmd, CompileStart):

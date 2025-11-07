@@ -83,6 +83,12 @@ class ShardingStreamModifier:
         if self.auto_shard_enabled:
             debug_print_dispatcher("[SHARDING] Auto-sharding enabled (GT_AUTO_SHARD=1)")
 
+        # Tensor location tracking
+        # Maps tensor_id -> list of (worker_id, shard_info, shape, dtype)
+        # If len > 1, tensor is sharded across workers
+        # shard_info is dict with {axis, shard_index, num_shards} or None if not sharded
+        self.tensor_locations: Dict[int, List[dict]] = {}
+
         # Stats
         self.total_commands = 0
         self.sharded_commands = 0
@@ -147,8 +153,272 @@ class ShardingStreamModifier:
                 yield from self._auto_shard_unary_creation(cmd)
                 return
 
-        # Default: pass through unchanged
+        # Default: pass through but assign worker if it's a creation op
+        if isinstance(cmd, CreateTensor):
+            # Assign to worker 0 if not already assigned
+            if cmd.worker_id is None:
+                workers = self.get_workers()
+                if workers and len(workers) > 0:
+                    cmd.worker_id = workers[0]['id']
+                    self._register_tensor_location(cmd.tensor_id, cmd.worker_id, cmd.shape, cmd.dtype)
+            yield cmd
+            return
+        elif isinstance(cmd, UnaryOp) and cmd.input_id is None:
+            # Creation op - assign worker
+            if cmd.worker_id is None:
+                workers = self.get_workers()
+                if workers and len(workers) > 0:
+                    cmd.worker_id = workers[0]['id']
+                    self._register_tensor_location(cmd.result_id, cmd.worker_id, cmd.shape, cmd.dtype)
+            yield cmd
+            return
+        elif isinstance(cmd, BinaryOp):
+            # Handle binary operations - need to handle cross-worker and sharded cases
+            yield from self._handle_binary_op(cmd)
+            return
+        elif isinstance(cmd, UnaryOp) and cmd.input_id is not None:
+            # UnaryOp with input (transpose, sqrt, relu, etc.)
+            yield from self._handle_unary_op(cmd)
+            return
+        elif isinstance(cmd, GetData):
+            # Let dispatcher handle GetData - it has the complete TensorHandle tracking
+            # Modifier only handles worker assignment for creation ops, not lookup
+            yield cmd
+            return
+
+        # Other commands pass through unchanged
         yield cmd
+
+    def _register_tensor_location(self, tensor_id: int, worker_id, shape, dtype, shard_info=None):
+        """
+        Register where a tensor is located.
+
+        Args:
+            tensor_id: Tensor ID
+            worker_id: Worker ID where tensor is located
+            shape: Tensor shape
+            dtype: Tensor dtype
+            shard_info: Optional dict with {axis, shard_index, num_shards}
+        """
+        if tensor_id not in self.tensor_locations:
+            self.tensor_locations[tensor_id] = []
+
+        self.tensor_locations[tensor_id].append({
+            'worker_id': worker_id,
+            'shape': shape,
+            'dtype': dtype,
+            'shard_info': shard_info
+        })
+
+    def _get_tensor_locations(self, tensor_id: int) -> List[dict]:
+        """Get all locations where a tensor exists."""
+        return self.tensor_locations.get(tensor_id, [])
+
+    def _handle_binary_op(self, cmd: BinaryOp) -> Iterator[ClientCommand]:
+        """
+        Handle binary operation with cross-worker and sharding logic.
+
+        Injects GatherShards commands when operands are sharded/replicated or on different workers.
+        """
+        from gt.transport.protocol import GatherShards
+        import time
+
+        # Get locations
+        left_locs = self._get_tensor_locations(cmd.left_id)
+        right_locs = self._get_tensor_locations(cmd.right_id)
+
+        if not left_locs or not right_locs:
+            # Tensor not found in tracking - pass through and let dispatcher handle error
+            debug_print_dispatcher(f"[BINARY_OP] Tensor {cmd.left_id} or {cmd.right_id} not found in tracking")
+            yield cmd
+            return
+
+        # Check if sharded/replicated
+        left_multi = len(left_locs) > 1
+        right_multi = len(right_locs) > 1
+
+        # Case 1: Both on same single worker - simple case
+        if not left_multi and not right_multi:
+            left_loc = left_locs[0]
+            right_loc = right_locs[0]
+
+            if left_loc['worker_id'] == right_loc['worker_id']:
+                # Same worker - simple case
+                cmd.worker_id = left_loc['worker_id']
+                yield cmd
+                # Register result location
+                self._register_tensor_location(
+                    cmd.result_id,
+                    left_loc['worker_id'],
+                    left_loc['shape'],  # Approximation
+                    left_loc['dtype']
+                )
+                debug_print_dispatcher(f"[BINARY_OP] Same-worker {cmd.op}, registered result {cmd.result_id} on worker {left_loc['worker_id']}")
+                return
+
+        # Case 2: Need to gather one or both operands
+        # Choose a target worker (prefer left's first worker, or any worker)
+        workers = self.get_workers()
+        if not workers or len(workers) == 0:
+            debug_print_dispatcher(f"[BINARY_OP] No workers available")
+            yield cmd
+            return
+
+        # Pick target worker (use left's first location if available, else first worker)
+        if left_locs:
+            target_worker = left_locs[0]['worker_id']
+        else:
+            target_worker = workers[0]['id']
+
+        debug_print_dispatcher(f"[BINARY_OP] {cmd.op} with left={len(left_locs)} locs, right={len(right_locs)} locs - gathering to worker {target_worker}")
+
+        # Generate temporary IDs for gathered tensors
+        left_gathered_id = cmd.left_id
+        right_gathered_id = cmd.right_id
+
+        # Gather left if needed
+        if left_multi:
+            left_gathered_id = cmd.left_id + 1000000 + int(time.time() * 1000000) % 1000000
+            debug_print_dispatcher(f"[BINARY_OP] Injecting GatherShards for left: {cmd.left_id} → {left_gathered_id}")
+            gather_left = GatherShards(
+                result_id=left_gathered_id,
+                source_tensor_id=cmd.left_id,
+                target_worker_id=target_worker
+            )
+            yield gather_left
+        elif left_locs[0]['worker_id'] != target_worker:
+            # Single location but wrong worker - need to gather/copy to target
+            left_gathered_id = cmd.left_id + 1000000 + int(time.time() * 1000000) % 1000000
+            debug_print_dispatcher(f"[BINARY_OP] Injecting GatherShards for left (cross-worker): {cmd.left_id} → {left_gathered_id}")
+            gather_left = GatherShards(
+                result_id=left_gathered_id,
+                source_tensor_id=cmd.left_id,
+                target_worker_id=target_worker
+            )
+            yield gather_left
+
+        # Gather right if needed
+        if right_multi:
+            right_gathered_id = cmd.right_id + 2000000 + int(time.time() * 1000000) % 1000000
+            debug_print_dispatcher(f"[BINARY_OP] Injecting GatherShards for right: {cmd.right_id} → {right_gathered_id}")
+            gather_right = GatherShards(
+                result_id=right_gathered_id,
+                source_tensor_id=cmd.right_id,
+                target_worker_id=target_worker
+            )
+            yield gather_right
+        elif right_locs[0]['worker_id'] != target_worker:
+            # Single location but wrong worker - need to gather/copy to target
+            right_gathered_id = cmd.right_id + 2000000 + int(time.time() * 1000000) % 1000000
+            debug_print_dispatcher(f"[BINARY_OP] Injecting GatherShards for right (cross-worker): {cmd.right_id} → {right_gathered_id}")
+            gather_right = GatherShards(
+                result_id=right_gathered_id,
+                source_tensor_id=cmd.right_id,
+                target_worker_id=target_worker
+            )
+            yield gather_right
+
+        # Inject modified BinaryOp with gathered inputs
+        modified_cmd = BinaryOp(
+            result_id=cmd.result_id,
+            op=cmd.op,
+            left_id=left_gathered_id,
+            right_id=right_gathered_id
+        )
+        # Set worker_id to ensure dispatcher routes it to the right worker
+        modified_cmd.worker_id = target_worker
+        yield modified_cmd
+
+        # Register result location
+        # Use left's dtype/shape as approximation (dispatcher will compute actual)
+        first_left = left_locs[0]
+        self._register_tensor_location(
+            cmd.result_id,
+            target_worker,
+            first_left['shape'],  # Approximation
+            first_left['dtype']
+        )
+        debug_print_dispatcher(f"[BINARY_OP] Registered result {cmd.result_id} on worker {target_worker}")
+
+    def _handle_unary_op(self, cmd: UnaryOp) -> Iterator[ClientCommand]:
+        """
+        Handle unary operation with input.
+
+        Assigns worker and tells dispatcher where to gather sharded tensors.
+        """
+        input_locs = self._get_tensor_locations(cmd.input_id)
+
+        if not input_locs:
+            # Tensor not found - pass through
+            debug_print_dispatcher(f"[UNARY_OP] Input tensor {cmd.input_id} not found in tracking")
+            yield cmd
+            return
+
+        # If sharded, inject GatherShards command followed by UnaryOp on gathered tensor
+        if len(input_locs) > 1:
+            # Choose first worker for gathering (could use any strategy here)
+            workers = self.get_workers()
+            if workers and len(workers) > 0:
+                target_worker = workers[0]['id']
+
+                # Generate temporary tensor ID for gathered result
+                # Use a large number to avoid conflicts with user tensor IDs
+                import time
+                gathered_tensor_id = cmd.input_id + 1000000 + int(time.time() * 1000000) % 1000000
+
+                debug_print_dispatcher(f"[UNARY_OP] Sharded {cmd.op} - injecting GatherShards({cmd.input_id} → {gathered_tensor_id}) on worker {target_worker}")
+
+                # Inject GatherShards command
+                from gt.transport.protocol import GatherShards
+                gather_cmd = GatherShards(
+                    result_id=gathered_tensor_id,
+                    source_tensor_id=cmd.input_id,
+                    target_worker_id=target_worker
+                )
+                yield gather_cmd
+
+                # Inject modified UnaryOp that operates on the gathered tensor
+                modified_cmd = UnaryOp(
+                    result_id=cmd.result_id,
+                    op=cmd.op,
+                    input_id=gathered_tensor_id,
+                    shape=cmd.shape,
+                    dtype=cmd.dtype,
+                    axis=getattr(cmd, 'axis', None),
+                    keepdims=getattr(cmd, 'keepdims', False),
+                    worker_id=target_worker
+                )
+                yield modified_cmd
+
+                # Register result location (dispatcher will create it, but we track it)
+                # Use the first input shard's shape/dtype as approximation
+                first_loc = input_locs[0]
+                self._register_tensor_location(
+                    cmd.result_id,
+                    target_worker,
+                    first_loc['shape'],  # Approximation (dispatcher will compute actual)
+                    first_loc['dtype']
+                )
+                debug_print_dispatcher(f"[UNARY_OP] Registered result tensor {cmd.result_id} on worker {target_worker}")
+                return
+            else:
+                debug_print_dispatcher(f"[UNARY_OP] No workers available for sharded {cmd.op}")
+                yield cmd
+                return
+
+        # Single location - assign to same worker as input
+        input_loc = input_locs[0]
+        cmd.worker_id = input_loc['worker_id']
+        yield cmd
+
+        # Register result location (same worker as input)
+        self._register_tensor_location(
+            cmd.result_id,
+            input_loc['worker_id'],
+            input_loc['shape'],  # Approximation
+            input_loc['dtype']
+        )
+        debug_print_dispatcher(f"[UNARY_OP] Registered result tensor {cmd.result_id} on worker {input_loc['worker_id']}")
 
     def _shard_create_tensor(self, cmd: CreateTensor, shard_config) -> Iterator[ClientCommand]:
         """
@@ -191,6 +461,8 @@ class ShardingStreamModifier:
                     worker_id=worker_id  # Specify target worker
                 )
                 yield shard_cmd
+                # Register location
+                self._register_tensor_location(cmd.tensor_id, worker_id, cmd.shape, cmd.dtype, shard_info=None)
             return
 
         # Sharded: split tensor along axis
@@ -244,6 +516,14 @@ class ShardingStreamModifier:
                 }
             )
             yield shard_cmd
+            # Register location
+            self._register_tensor_location(
+                cmd.tensor_id,
+                worker_id,
+                tuple(shard_shape),
+                cmd.dtype,
+                shard_info={'axis': axis, 'shard_index': shard_idx, 'num_shards': num_shards}
+            )
 
     def _shard_unary_creation(self, cmd: UnaryOp, shard_config) -> Iterator[ClientCommand]:
         """
@@ -262,6 +542,8 @@ class ShardingStreamModifier:
         if len(workers) == 1:
             cmd.worker_id = workers[0]
             yield cmd
+            # Register single-worker tensor location
+            self._register_tensor_location(cmd.result_id, workers[0], cmd.shape, cmd.dtype)
             return
 
         if cmd.shape is None or len(cmd.shape) <= axis:
@@ -283,6 +565,8 @@ class ShardingStreamModifier:
                     worker_id=worker_id
                 )
                 yield shard_cmd
+                # Register replicated tensor location
+                self._register_tensor_location(cmd.result_id, worker_id, cmd.shape, cmd.dtype)
             return
 
         # Sharded: split along axis
@@ -320,6 +604,14 @@ class ShardingStreamModifier:
                 }
             )
             yield shard_cmd
+            # Register shard location
+            self._register_tensor_location(
+                cmd.result_id,
+                worker_id,
+                tuple(shard_shape),
+                cmd.dtype,
+                shard_info={'axis': axis, 'shard_index': shard_idx, 'num_shards': num_shards}
+            )
 
     def get_stats(self) -> dict:
         """Get sharding statistics."""
@@ -378,6 +670,7 @@ class ShardingStreamModifier:
                     worker_id=worker['id']
                 )
                 yield shard_cmd
+                self._register_tensor_location(cmd.tensor_id, worker['id'], cmd.shape, cmd.dtype)
             self.sharded_commands += 1
             return
 
@@ -419,6 +712,13 @@ class ShardingStreamModifier:
                 }
             )
             yield shard_cmd
+            self._register_tensor_location(
+                cmd.tensor_id,
+                worker['id'],
+                tuple(shard_shape),
+                cmd.dtype,
+                shard_info={'axis': axis, 'shard_index': shard_idx, 'num_shards': num_workers}
+            )
 
         self.sharded_commands += 1
 
@@ -437,6 +737,8 @@ class ShardingStreamModifier:
         if len(workers) == 1:
             cmd.worker_id = workers[0]['id']
             yield cmd
+            # Register single-worker tensor location
+            self._register_tensor_location(cmd.result_id, workers[0]['id'], cmd.shape, cmd.dtype)
             return
 
         if cmd.shape is None or len(cmd.shape) == 0:
@@ -468,6 +770,9 @@ class ShardingStreamModifier:
                     worker_id=worker['id']
                 )
                 yield shard_cmd
+                # Register replicated tensor location
+                self._register_tensor_location(cmd.result_id, worker['id'], cmd.shape, cmd.dtype)
+                debug_print_dispatcher(f"[AUTO-SHARD] Registered REPLICATED location for tensor {cmd.result_id} on worker {worker['id']}")
             self.sharded_commands += 1
             return
 
@@ -497,5 +802,14 @@ class ShardingStreamModifier:
                 }
             )
             yield shard_cmd
+            # Register shard location
+            self._register_tensor_location(
+                cmd.result_id,
+                worker['id'],
+                tuple(shard_shape),
+                cmd.dtype,
+                shard_info={'axis': axis, 'shard_index': shard_idx, 'num_shards': num_workers}
+            )
+            debug_print_dispatcher(f"[AUTO-SHARD] Registered location for tensor {cmd.result_id} on worker {worker['id']}")
 
         self.sharded_commands += 1
