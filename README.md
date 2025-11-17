@@ -34,15 +34,15 @@ while presenting a familiar eager frontend.
  
 ## [Philosophy](https://en.wikipedia.org/wiki/Unix_philosophy#Mike_Gancarz:_The_UNIX_Philosophy)
 
-Small is beautiful.
-Make each program do one thing well.
-Build a prototype as soon as possible.
-Choose portability over efficiency.
-Store data in flat text files.
-Use software leverage to your advantage.
-Use shell scripts to increase leverage and portability.
-Avoid captive user interfaces.
-Make every program a filter.
+- Small is beautiful.
+- Make each program do one thing well.
+- Build a prototype as soon as possible.
+- Choose portability over efficiency.
+- Store data in flat text files.
+- Use software leverage to your advantage.
+- Use shell scripts to increase leverage and portability.
+- Avoid captive user interfaces.
+- Make every program a filter.
 
 ## Quick Start
 
