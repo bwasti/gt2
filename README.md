@@ -31,6 +31,18 @@ while presenting a familiar eager frontend.
    - Dispatchers annotate "hot" paths to give hints to workers about JIT compiling
    - Annotations are supplemented with YAML configs that specify sharding and compilation information
    - Every annotation can be safely ignored, so the same code can run anywhere (just remove the YAML)
+ 
+## [Philosophy](https://en.wikipedia.org/wiki/Unix_philosophy#Mike_Gancarz:_The_UNIX_Philosophy)
+
+Small is beautiful.
+Make each program do one thing well.
+Build a prototype as soon as possible.
+Choose portability over efficiency.
+Store data in flat text files.
+Use software leverage to your advantage.
+Use shell scripts to increase leverage and portability.
+Avoid captive user interfaces.
+Make every program a filter.
 
 ## Quick Start
 
